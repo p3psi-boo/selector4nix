@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -6,8 +7,11 @@ use serde::Serialize;
 use crate::application::actor::nar_info::NarInfoActorRegistry;
 use crate::domain::common::url::Url;
 use crate::domain::substituter::SubstituterRepository;
-use crate::domain::substituter::model::{Availability, Priority};
+use crate::domain::substituter::model::{
+    Availability, CandidateSource, EndpointSnapshotStatus, Priority, is_fastly_optimization_host,
+};
 use crate::infrastructure::config::AppCredential;
+use crate::infrastructure::endpoint::manager::EndpointManager;
 use crate::infrastructure::metric::NarTransferMetric;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -39,6 +43,14 @@ pub struct OverviewSubstituterItemData {
     priority: Priority,
     has_credential: bool,
     status: SubstituterStatus,
+    endpoints: Vec<OverviewEndpointItemData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct OverviewEndpointItemData {
+    ip: IpAddr,
+    source: String,
+    status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -54,6 +66,7 @@ pub struct GetDashboardOverviewUseCase {
     nar_info_registry: Arc<NarInfoActorRegistry>,
     nar_transfer_metric: Arc<NarTransferMetric>,
     credentials: Arc<AppCredential>,
+    endpoint_manager: Option<Arc<EndpointManager>>,
     nar_info_cache_capacity: NonZeroUsize,
     cache_mode: CacheMode,
 }
@@ -64,6 +77,7 @@ impl GetDashboardOverviewUseCase {
         nar_info_registry: Arc<NarInfoActorRegistry>,
         nar_transfer_metric: Arc<NarTransferMetric>,
         credentials: Arc<AppCredential>,
+        endpoint_manager: Option<Arc<EndpointManager>>,
         nar_info_cache_capacity: NonZeroUsize,
         has_persistent_cache: bool,
     ) -> Self {
@@ -72,6 +86,7 @@ impl GetDashboardOverviewUseCase {
             nar_info_registry,
             nar_transfer_metric,
             credentials,
+            endpoint_manager,
             nar_info_cache_capacity,
             cache_mode: if has_persistent_cache {
                 CacheMode::Persistent
@@ -106,6 +121,7 @@ impl GetDashboardOverviewUseCase {
                     Availability::ServiceError { .. } => SubstituterStatus::ServiceError,
                     Availability::MaybeReady { .. } => SubstituterStatus::MaybeReady,
                 },
+                endpoints: self.endpoints_for(s.url()),
             })
             .collect::<Vec<_>>();
         substituters.sort_by(|lhs, rhs| (lhs.priority, &lhs.url).cmp(&(rhs.priority, &rhs.url)));
@@ -114,5 +130,37 @@ impl GetDashboardOverviewUseCase {
             summary,
             substituters,
         }
+    }
+
+    /// Endpoint snapshot for the substituter, non-empty only when fastly
+    /// optimization applies to its host and an endpoint manager exists.
+    fn endpoints_for(&self, url: &Url) -> Vec<OverviewEndpointItemData> {
+        let Some(manager) = &self.endpoint_manager else {
+            return Vec::new();
+        };
+        if !is_fastly_optimization_host(url.host()) {
+            return Vec::new();
+        }
+        manager
+            .snapshot()
+            .into_iter()
+            .map(|snapshot| OverviewEndpointItemData {
+                ip: snapshot.ip,
+                source: match snapshot.source {
+                    CandidateSource::DnsDoh => "DoH",
+                    CandidateSource::UserConfigured => "configured",
+                    CandidateSource::DerivedRegion => "derived",
+                }
+                .to_string(),
+                status: match snapshot.status {
+                    EndpointSnapshotStatus::Usable { admission_latency } => {
+                        format!("Usable ({}ms)", admission_latency.as_millis())
+                    }
+                    EndpointSnapshotStatus::Pending => "Pending".to_string(),
+                    EndpointSnapshotStatus::Cooling => "Cooling".to_string(),
+                    EndpointSnapshotStatus::Incompatible => "Incompatible".to_string(),
+                },
+            })
+            .collect()
     }
 }

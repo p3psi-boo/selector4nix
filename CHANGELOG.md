@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 ### Added
 
 - Added `/{storePathHash}.ls` endpoint, which lists the recursive directory structure of a particular store path.
+- Added the `fastly_optimization` configuration section, which enables Fastly endpoint optimization for `cache.nixos.org` substituters. Candidate endpoints are discovered via DNS-over-HTTPS, user-configured IP literals (`fastly_optimization.candidates`), and optional region derivation (`fastly_optimization.derive_regions`), admission-probed over TLS, and ordered by latency. Only the TCP connection target IP is overridden while the URL, HTTP Host, and TLS SNI remain `cache.nixos.org` with strict certificate verification; failing endpoints fail over automatically, and requests fall back to the default system-DNS path when no endpoint is usable.
 - Added the `substituters[].max_concurrent_requests` configuration option to override the per-host NAR streaming concurrency limit per substituter, useful for upstream servers that fail under high concurrency. [@luochen1990]
 - Added the `proxy.resolution_policy` configuration option. [@luochen1990]
     - When its value is `"preference"`, the original resolution policy based on preference values that is calculated from latency and other metrics is used. This is the default policy.

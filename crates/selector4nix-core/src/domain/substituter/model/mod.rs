@@ -1,9 +1,15 @@
 mod availability;
+mod endpoint;
 mod priority;
 mod substituter;
 mod substituter_meta;
 
 pub use availability::Availability;
+pub use endpoint::{
+    CandidateSource, EndpointFailureKind, EndpointSnapshot, EndpointSnapshotStatus, EndpointState,
+    FASTLY_OPTIMIZATION_HOSTS, SubstituterEndpoint, is_fastly_optimization_host,
+    order_for_selection,
+};
 pub use priority::{Priority, TryNewPriorityError};
 pub use substituter::{PeriodicProbingOption, ProbedState, Substituter, UpdateSubstituterEvent};
 pub use substituter_meta::SubstituterMeta;

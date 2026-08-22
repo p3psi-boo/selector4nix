@@ -13,6 +13,7 @@ pub struct AppRawConfiguration {
     pub cache_info: Option<CacheInfoRawConfiguration>,
     pub cache: Option<CacheRawConfiguration>,
     pub substituters: Vec<SubstituterRawConfiguration>,
+    pub fastly_optimization: Option<FastlyOptimizationRawConfiguration>,
 }
 
 impl AppRawConfiguration {
@@ -65,6 +66,14 @@ pub struct CacheRawConfiguration {
     pub nar_info_ttl_secs: Option<NonZeroU64>,
     pub nar_file_cache_capacity: Option<NonZeroUsize>,
     pub nar_file_ttl_secs: Option<NonZeroU64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FastlyOptimizationRawConfiguration {
+    pub enabled: Option<bool>,
+    pub candidates: Option<Vec<IpAddr>>,
+    pub derive_regions: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]

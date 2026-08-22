@@ -125,3 +125,84 @@ ip = "127.0.0.1"
 
     assert!(result.is_err());
 }
+
+#[test]
+fn fastly_optimization_defaults_to_disabled() {
+    let config = AppConfiguration::deserialize(&make_config_string_minimal()).unwrap();
+
+    assert!(!config.fastly_optimization.enabled);
+    assert!(config.fastly_optimization.candidates.is_empty());
+    assert!(!config.fastly_optimization.derive_regions);
+}
+
+#[test]
+fn fastly_optimization_is_parsed_when_enabled() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[fastly_optimization]
+enabled = true
+candidates = ["151.101.1.91", "151.101.65.91"]
+derive_regions = true
+"#,
+    ))
+    .unwrap();
+
+    assert!(config.fastly_optimization.enabled);
+    assert_eq!(
+        config.fastly_optimization.candidates,
+        vec![
+            "151.101.1.91".parse::<std::net::IpAddr>().unwrap(),
+            "151.101.65.91".parse::<std::net::IpAddr>().unwrap(),
+        ],
+    );
+    assert!(config.fastly_optimization.derive_regions);
+}
+
+#[test]
+fn fastly_optimization_requires_cache_nixos_org_substituter() {
+    let result = AppConfiguration::deserialize(
+        r#"
+[server]
+ip = "127.0.0.1"
+
+[[substituters]]
+url = "https://mirror.example.com/"
+
+[fastly_optimization]
+enabled = true
+"#,
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn fastly_optimization_candidates_are_deduplicated() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[fastly_optimization]
+candidates = ["151.101.1.91", "151.101.65.91", "151.101.1.91"]
+"#,
+    ))
+    .unwrap();
+
+    assert_eq!(
+        config.fastly_optimization.candidates,
+        vec![
+            "151.101.1.91".parse::<std::net::IpAddr>().unwrap(),
+            "151.101.65.91".parse::<std::net::IpAddr>().unwrap(),
+        ],
+    );
+}
+
+#[test]
+fn fastly_optimization_rejects_non_ip_candidates() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[fastly_optimization]
+candidates = ["cache.nixos.org"]
+"#,
+    ));
+
+    assert!(result.is_err());
+}

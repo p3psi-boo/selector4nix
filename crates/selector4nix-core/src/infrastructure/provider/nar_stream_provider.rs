@@ -1,3 +1,5 @@
+use std::error::Error as _;
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::Result as AnyhowResult;
@@ -12,18 +14,61 @@ use crate::domain::nar_file::model::NarFileLocation;
 use crate::domain::nar_file::port::{
     NarStreamData, NarStreamHeaders, NarStreamOpenAttempt, NarStreamProvider,
 };
+use crate::domain::substituter::model::{EndpointFailureKind, is_fastly_optimization_host};
 use crate::infrastructure::config::AppCredential;
+use crate::infrastructure::endpoint::manager::EndpointManager;
+
+/// Ordered usable endpoint IPs when `host` is eligible for endpoint
+/// optimization and the manager has usable endpoints. `None` means the
+/// caller falls back to the default client path.
+fn endpoint_ips_for(host: &str, manager: Option<&EndpointManager>) -> Option<Vec<IpAddr>> {
+    if !is_fastly_optimization_host(host) {
+        return None;
+    }
+    let ips = manager?.ordered_usable();
+    if ips.is_empty() { None } else { Some(ips) }
+}
+
+/// reqwest 0.13 does not expose a dedicated TLS-certificate error kind, so
+/// the error chain is scanned for certificate-related keywords (mirrors the
+/// admission-probing classification in `EndpointProbingProvider`).
+fn classify_endpoint_failure(error: &reqwest::Error) -> EndpointFailureKind {
+    let mut looks_like_certificate = contains_certificate_keyword(&error.to_string());
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if !looks_like_certificate && contains_certificate_keyword(&cause.to_string()) {
+            looks_like_certificate = true;
+        }
+        source = cause.source();
+    }
+    if looks_like_certificate {
+        EndpointFailureKind::Certificate
+    } else {
+        EndpointFailureKind::Transient
+    }
+}
+
+fn contains_certificate_keyword(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls")
+}
 
 pub struct ReqwestNarStreamProvider {
     client: Arc<StreamingClient>,
     credentials: Arc<AppCredential>,
+    endpoint_manager: Option<Arc<EndpointManager>>,
 }
 
 impl ReqwestNarStreamProvider {
-    pub fn new(client: Arc<StreamingClient>, credentials: Arc<AppCredential>) -> Self {
+    pub fn new(
+        client: Arc<StreamingClient>,
+        credentials: Arc<AppCredential>,
+        endpoint_manager: Option<Arc<EndpointManager>>,
+    ) -> Self {
         Self {
             client,
             credentials,
+            endpoint_manager,
         }
     }
 
@@ -73,27 +118,101 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
 
             let client = Arc::clone(&self.client);
             let credentials = Arc::clone(&self.credentials);
+            let endpoint_manager = self.endpoint_manager.clone();
 
             set.spawn(async move {
-                let request = client.get(location.source_url().value()).configure({
-                    let location = location.clone();
-                    move |request| {
-                        let mut request = request.headers(headers.to_headers());
+                // Endpoint-eligible locations try each usable endpoint in
+                // order; anything else uses the default client exactly once.
+                let clients: Vec<(Option<IpAddr>, Arc<StreamingClient>)> = endpoint_manager
+                    .as_ref()
+                    .and_then(|manager| {
+                        endpoint_ips_for(
+                            location.substituter().url().host(),
+                            Some(manager),
+                        )
+                        .map(|ips| {
+                            ips.into_iter()
+                                .filter_map(|ip| {
+                                    manager
+                                        .client_for(ip)
+                                        .map(|clients| (Some(ip), clients.streaming))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .filter(|clients| !clients.is_empty())
+                    .unwrap_or_else(|| vec![(None, Arc::clone(&client))]);
 
-                        if let Some(credential) = credentials.lookup(location.source_url()) {
-                            request = request
-                                .basic_auth(credential.login.clone(), credential.secret.clone());
-                        }
-
-                        request
+                let mut last_response = None;
+                let mut endpoint_failed = false;
+                for (ip, stream_client) in clients {
+                    if let Some(ip) = ip {
+                        tracing::trace!(url = %location.source_url(), %ip, "opening nar stream via endpoint");
+                    } else if endpoint_failed {
+                        tracing::warn!(url = %location.source_url(), "all endpoints failed; falling back to default client");
                     }
-                });
+                    let request = stream_client.get(location.source_url().value()).configure({
+                        let location = location.clone();
+                        let headers = headers.clone();
+                        let credentials = Arc::clone(&credentials);
+                        move |request| {
+                            let mut request = request.headers(headers.to_headers());
 
-                let response = if let Some(timeout) = location.timeout() {
-                    tokio::time::timeout(timeout, request.send()).await
-                } else {
-                    Ok(request.send().await)
-                };
+                            if let Some(credential) = credentials.lookup(location.source_url()) {
+                                request = request
+                                    .basic_auth(credential.login.clone(), credential.secret.clone());
+                            }
+
+                            request
+                        }
+                    });
+
+                    let attempt = if let Some(timeout) = location.timeout() {
+                        tokio::time::timeout(timeout, request.send()).await
+                    } else {
+                        Ok(request.send().await)
+                    };
+
+                    let retry_with_next_endpoint = match &attempt {
+                        // Success and NotFound (the resource is absent, the
+                        // endpoint is healthy) are final for this location.
+                        Ok(Ok(_)) | Ok(Err(StreamHttpBodyError::NotFound)) => false,
+                        Ok(Err(err)) => {
+                            if let Some(ip) = ip {
+                                let kind = match err {
+                                    StreamHttpBodyError::Transport { source } => {
+                                        classify_endpoint_failure(source)
+                                    }
+                                    _ => EndpointFailureKind::Transient,
+                                };
+                                tracing::debug!(url = %location.source_url(), %ip, ?kind, error = %err, "endpoint nar stream failed; trying next endpoint");
+                                endpoint_failed = true;
+                                endpoint_manager
+                                    .as_ref()
+                                    .expect("endpoint manager is present for endpoint attempts")
+                                    .report_failure(ip, kind);
+                            }
+                            ip.is_some()
+                        }
+                        Err(_) => {
+                            if let Some(ip) = ip {
+                                tracing::debug!(url = %location.source_url(), %ip, "endpoint nar stream timed out; trying next endpoint");
+                                endpoint_failed = true;
+                                endpoint_manager
+                                    .as_ref()
+                                    .expect("endpoint manager is present for endpoint attempts")
+                                    .report_failure(ip, EndpointFailureKind::Transient);
+                            }
+                            ip.is_some()
+                        }
+                    };
+
+                    last_response = Some(attempt);
+                    if !retry_with_next_endpoint {
+                        break;
+                    }
+                }
+                let response = last_response.expect("at least one stream attempt was made");
                 (location.clone(), response)
             });
         }
@@ -144,5 +263,63 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
             let err = Err(anyhow::anyhow!("could not fetch nar from any substituter"));
             (err, attempts)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    use reqwest::Client;
+    use selector4nix_streaming::throttler::{PerHostHttpThrottler, ThrottlingOptions};
+
+    use super::*;
+    use crate::infrastructure::dns::doh_resolver::DohResolver;
+    use crate::infrastructure::provider::{EndpointClientPool, EndpointProbingProvider};
+
+    fn make_manager(user_candidates: Vec<IpAddr>, port: u16) -> EndpointManager {
+        let pool = Arc::new(EndpointClientPool::new(
+            "cache.nixos.org".to_string(),
+            port,
+            Arc::new(Client::builder),
+            Arc::new(PerHostHttpThrottler::new(ThrottlingOptions::new(
+                NonZeroUsize::new(8).unwrap(),
+            ))),
+            false,
+            NonZeroUsize::new(1024).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+            16,
+        ));
+        let probing = Arc::new(EndpointProbingProvider::new(
+            Arc::clone(&pool),
+            Duration::from_secs(5),
+        ));
+        EndpointManager::new(
+            "cache.nixos.org".to_string(),
+            Url::new(&format!("http://cache.nixos.org:{port}")).unwrap(),
+            pool,
+            probing,
+            Arc::new(DohResolver::new()),
+            user_candidates,
+            false,
+        )
+    }
+
+    #[test]
+    fn non_whitelist_host_falls_back() {
+        assert!(endpoint_ips_for("releases.nixos.org", None).is_none());
+    }
+
+    #[test]
+    fn missing_manager_falls_back() {
+        assert!(endpoint_ips_for("cache.nixos.org", None).is_none());
+    }
+
+    #[test]
+    fn empty_usable_endpoints_fall_back() {
+        let manager = make_manager(Vec::new(), 1443);
+        assert!(endpoint_ips_for("cache.nixos.org", Some(&manager)).is_none());
     }
 }

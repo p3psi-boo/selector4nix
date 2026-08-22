@@ -93,6 +93,39 @@ When enabled, NAR info lookup errors from substituters are treated as not-found 
 
 When enabled, `selector4nix` continuously probes substituters every 30 seconds to detect failures early. Probing during retry recovery always occurs regardless of this setting.
 
+## `fastly_optimization`
+
+Fastly endpoint optimization for the official Nix cache. This is a global section and does not belong to any single substituter.
+
+When enabled, requests to the substituter whose host is `cache.nixos.org` are sent to Fastly edge endpoints discovered and probed at runtime, instead of relying on system DNS resolution. Only the TCP connection target IP is overridden (equivalent to `curl --resolve`): the request URL, the HTTP `Host` header, and the TLS SNI all remain `cache.nixos.org`, and certificate verification is performed strictly as usual. Other substituters are unaffected.
+
+Candidate endpoints come from three sources: DNS-over-HTTPS lookups against `cloudflare-dns.com` and `dns.google` (bypassing the system DNS, so fake-ip environments work too), IP literals configured via `candidates`, and region-derived candidates when `derive_regions` is enabled. Every candidate must pass an admission probe — a TLS handshake plus a `GET /nix-cache-info` request returning 200 — before it is considered usable. Usable endpoints are ordered by their admission latency, and a failing endpoint automatically fails over to another endpoint of the same substituter. If no endpoint is usable, requests fall back to the default path using system DNS, behaving exactly as if this feature were disabled.
+
+Note that endpoint requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. Under transparent proxies (TUN/fake-ip), all endpoints go through the same proxy chain, so endpoint preference is of limited benefit there — DoH-based discovery still works in that case. All Range requests of a chunked NAR download are pinned to the same endpoint, and the concurrency quota is still shared per logical host.
+
+Enabling this section requires a substituter with host `cache.nixos.org` in the configuration; otherwise the server refuses to start.
+
+### `fastly_optimization.enabled`
+
+- Type: Boolean
+- Default: `false`
+
+Whether Fastly endpoint optimization is enabled.
+
+### `fastly_optimization.candidates`
+
+- Type: Array of IP Address
+- Default: `[]`
+
+Additional seed endpoint candidates as IP literals. Domain names are not accepted.
+
+### `fastly_optimization.derive_regions`
+
+- Type: Boolean
+- Default: `false`
+
+Whether to derive additional regional endpoint candidates from the discovered Fastly addresses (see [mosdns discussion #511](https://github.com/IrineSistiana/mosdns/discussions/511)).
+
 ## `proxy`
 
 Proxy behavior settings.

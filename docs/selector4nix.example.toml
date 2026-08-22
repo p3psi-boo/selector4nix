@@ -32,6 +32,27 @@ streaming_chunk_max_len = 4194304
 # Maximum number of in-flight chunks per NAR file, also bounded by max_concurrent_requests (default: 8).
 streaming_window_max_len = 8
 
+# Fastly endpoint optimization for the official Nix cache (global section).
+# Only applies to the substituter whose host is cache.nixos.org; enabling this
+# requires such a substituter to be configured. The URL, HTTP Host, and TLS SNI
+# always remain cache.nixos.org with strict certificate verification — only the
+# TCP connection target IP is overridden (like `curl --resolve`). Candidates
+# come from DoH lookups (cloudflare-dns.com / dns.google, bypassing system DNS),
+# the candidates list below, and optionally derived regions. Each candidate must
+# pass an admission probe (TLS + GET /nix-cache-info returning 200) before use.
+# Endpoint requests bypass environment proxies; under transparent proxies
+# (TUN/fake-ip) all endpoints share the same proxy chain, so this is of limited
+# benefit there. If no endpoint is usable, requests fall back to the default
+# system-DNS path, behaving as if disabled.
+[fastly_optimization]
+# Whether to enable Fastly endpoint optimization (default: false).
+enabled = false
+# Additional seed endpoint candidates as IP literals; domain names are not accepted (default: []).
+candidates = []
+# Whether to derive additional regional endpoint candidates from the discovered
+# Fastly addresses, see https://github.com/IrineSistiana/mosdns/discussions/511 (default: false).
+derive_regions = false
+
 # Proxy behavior settings.
 [proxy]
 # Whether to rewrite NAR URLs in NAR info responses (default: true).

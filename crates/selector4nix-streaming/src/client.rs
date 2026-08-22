@@ -38,13 +38,29 @@ impl StreamingClient {
         chunk_max_len: NonZeroUsize,
         window_max_len: NonZeroUsize,
     ) -> Self {
+        Self::with_shared_throttler(
+            client,
+            Arc::new(PerHostHttpThrottler::new(throttling)),
+            enable_chunked_streaming,
+            chunk_max_len,
+            window_max_len,
+        )
+    }
+
+    pub fn with_shared_throttler(
+        client: ClientBuilder,
+        throttler: Arc<PerHostHttpThrottler>,
+        enable_chunked_streaming: bool,
+        chunk_max_len: NonZeroUsize,
+        window_max_len: NonZeroUsize,
+    ) -> Self {
         Self {
             context: Arc::new(StreamingClientContext {
                 client: client
                     .http1_only()
                     .build()
                     .expect("invalid reqwest client configuration"),
-                throttler: Arc::new(PerHostHttpThrottler::new(throttling)),
+                throttler,
                 enable_chunked_streaming,
                 chunk_max_len,
                 window_max_len,
@@ -250,4 +266,23 @@ pub enum StreamHttpBodyError {
     InvalidStatus { status: StatusCode },
     #[snafu(display("invalid response from the server: {message}"))]
     InvalidResponse { message: &'static str },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_shared_throttler_constructs_client() {
+        let throttler = Arc::new(PerHostHttpThrottler::new(ThrottlingOptions::new(
+            NonZeroUsize::new(8).unwrap(),
+        )));
+        let _client = StreamingClient::with_shared_throttler(
+            Client::builder(),
+            throttler,
+            false,
+            NonZeroUsize::new(1024).unwrap(),
+            NonZeroUsize::new(4096).unwrap(),
+        );
+    }
 }

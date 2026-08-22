@@ -39,6 +39,31 @@ impl GetDashboardConfigSummaryUseCase {
                 self.network_section(),
                 self.proxy_section(),
                 self.cache_info_section(),
+                self.fastly_optimization_section(),
+            ],
+        }
+    }
+
+    fn fastly_optimization_section(&self) -> ConfigSummarySectionData {
+        let cfg = &self.config.fastly_optimization;
+        ConfigSummarySectionData {
+            title: "Fastly Optimization",
+            entries: vec![
+                ConfigSummaryEntryData {
+                    name: "Enabled",
+                    description: "Endpoint optimization for cache.nixos.org.",
+                    value: cfg.enabled.to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "Derived region candidates",
+                    description: "Derive additional endpoint candidates from Fastly region patterns.",
+                    value: cfg.derive_regions.to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "Configured candidates",
+                    description: "Number of explicitly configured endpoint candidate IPs.",
+                    value: format!("{}", cfg.candidates.len()),
+                },
             ],
         }
     }

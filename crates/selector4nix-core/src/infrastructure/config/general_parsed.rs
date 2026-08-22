@@ -10,8 +10,9 @@ use crate::domain::nar_info::ResolutionPolicyOption;
 use crate::domain::nar_info::model::NarUrlRewriteOption;
 use crate::domain::substituter::model::{PeriodicProbingOption, Priority};
 use crate::infrastructure::config::general_raw::{
-    AppRawConfiguration, CacheInfoRawConfiguration, CacheRawConfiguration, NetworkRawConfiguration,
-    ProxyRawConfiguration, ServerRawConfiguration, SubstituterRawConfiguration,
+    AppRawConfiguration, CacheInfoRawConfiguration, CacheRawConfiguration,
+    FastlyOptimizationRawConfiguration, NetworkRawConfiguration, ProxyRawConfiguration,
+    ServerRawConfiguration, SubstituterRawConfiguration,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -22,6 +23,7 @@ pub struct AppConfiguration {
     pub cache_info: CacheInfoConfiguration,
     pub cache: CacheConfiguration,
     pub substituters: Vec<SubstituterConfiguration>,
+    pub fastly_optimization: FastlyOptimizationConfiguration,
 }
 
 impl AppConfiguration {
@@ -67,17 +69,30 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
                 "at least one substituter must be configured"
             ));
         }
+        let substituters = raw
+            .substituters
+            .into_iter()
+            .map(|c| c.try_into())
+            .collect::<Result<Vec<SubstituterConfiguration>, _>>()?;
+        let fastly_optimization: FastlyOptimizationConfiguration =
+            raw.fastly_optimization.unwrap_or_default().try_into()?;
+        if fastly_optimization.enabled
+            && !substituters
+                .iter()
+                .any(|s| s.url.host() == "cache.nixos.org")
+        {
+            return Err(anyhow::anyhow!(
+                "`fastly_optimization` requires a substituter with host `cache.nixos.org`"
+            ));
+        }
         Ok(Self {
             server: raw.server.try_into()?,
             network: raw.network.unwrap_or_default().try_into()?,
             proxy: raw.proxy.unwrap_or_default().try_into()?,
             cache_info: raw.cache_info.unwrap_or_default().try_into()?,
             cache: raw.cache.unwrap_or_default().try_into()?,
-            substituters: raw
-                .substituters
-                .into_iter()
-                .map(|c| c.try_into())
-                .collect::<Result<_, _>>()?,
+            substituters,
+            fastly_optimization,
         })
     }
 }
@@ -240,6 +255,31 @@ impl TryFrom<CacheRawConfiguration> for CacheConfiguration {
             nar_file_ttl: raw
                 .nar_file_ttl_secs
                 .map_or(Duration::from_hours(4), |s| Duration::from_secs(s.get())),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FastlyOptimizationConfiguration {
+    pub enabled: bool,
+    pub candidates: Vec<IpAddr>,
+    pub derive_regions: bool,
+}
+
+impl TryFrom<FastlyOptimizationRawConfiguration> for FastlyOptimizationConfiguration {
+    type Error = AnyhowError;
+
+    fn try_from(raw: FastlyOptimizationRawConfiguration) -> Result<Self, Self::Error> {
+        let mut candidates = Vec::new();
+        for candidate in raw.candidates.unwrap_or_default() {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        Ok(Self {
+            enabled: raw.enabled.unwrap_or(false),
+            candidates,
+            derive_regions: raw.derive_regions.unwrap_or(false),
         })
     }
 }

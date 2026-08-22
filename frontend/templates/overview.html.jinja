@@ -89,6 +89,27 @@
                   {% endif %}
                 </td>
               </tr>
+              {% for endpoint in substituter.endpoints %}
+                <tr class="transition-colors hover:bg-canvas/50">
+                  <td class="flex flex-col gap-px px-4 py-2 pl-8 whitespace-nowrap">
+                    <span class="font-mono text-sm text-muted tabular-nums">
+                      {{ endpoint.ip }} · {{ endpoint.source }} ·
+                      {% if endpoint.status is startingwith("Usable") %}
+                        <span class="text-success">{{ endpoint.status }}</span>
+                      {% elif endpoint.status == "Incompatible" %}
+                        <span class="text-danger">{{ endpoint.status }}</span>
+                      {% elif endpoint.status == "Cooling" %}
+                        <span class="text-warn">{{ endpoint.status }}</span>
+                      {% else %}
+                        <span class="text-muted">{{ endpoint.status }}</span>
+                      {% endif %}
+                    </span>
+                  </td>
+                  <td class="px-4 py-2 whitespace-nowrap"></td>
+                  <td class="px-4 py-2 whitespace-nowrap"></td>
+                  <td class="px-4 py-2 whitespace-nowrap"></td>
+                </tr>
+              {% endfor %}
             {% endfor %}
           </tbody>
         </table>
