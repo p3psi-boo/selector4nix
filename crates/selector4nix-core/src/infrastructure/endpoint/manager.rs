@@ -24,7 +24,8 @@ use crate::infrastructure::provider::{
 const PROBE_CONCURRENCY: usize = 8;
 
 /// Merge candidate IPs from all discovery sources, deduplicated; the first
-/// source (DoH, then user-configured, then derived regions) wins.
+/// source (DoH — including discovery domains, then user-configured, then
+/// derived regions) wins.
 fn collect_candidates(
     discovered: &[Ipv4Addr],
     user_candidates: &[IpAddr],
@@ -87,11 +88,15 @@ pub struct EndpointManager {
     base_url: Url,
     user_candidates: Vec<IpAddr>,
     derive_regions: bool,
+    /// Third-party optimization domains whose DoH A records are added to the
+    /// candidates (e.g. a Cloudflare preferred-IP domain); empty for Fastly.
+    discovery_domains: Vec<String>,
     /// First endpoint of the previous selection order, for change logging.
     last_selected: Mutex<Option<IpAddr>>,
 }
 
 impl EndpointManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: String,
         base_url: Url,
@@ -100,6 +105,7 @@ impl EndpointManager {
         doh: Arc<DohResolver>,
         user_candidates: Vec<IpAddr>,
         derive_regions: bool,
+        discovery_domains: Vec<String>,
     ) -> Self {
         Self {
             endpoints: DashMap::new(),
@@ -110,14 +116,32 @@ impl EndpointManager {
             base_url,
             user_candidates,
             derive_regions,
+            discovery_domains,
             last_selected: Mutex::new(None),
         }
     }
 
-    /// Discover candidates (DoH ∪ configured ∪ derived), keep existing
-    /// endpoint states untouched, and admission-probe all pending endpoints.
+    /// The logical host this manager is bound to.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Discover candidates (DoH of the host ∪ DoH of discovery domains ∪
+    /// configured ∪ derived), keep existing endpoint states untouched, and
+    /// admission-probe all pending endpoints.
     pub async fn refresh(&self) {
-        let discovered = self.doh.query_a(&self.host).await;
+        let mut discovered = self.doh.query_a(&self.host).await;
+        for domain in &self.discovery_domains {
+            let answers = self.doh.query_a(domain).await;
+            if answers.is_empty() {
+                tracing::warn!(
+                    host = %self.host,
+                    domain,
+                    "discovery domain yielded no A records"
+                );
+            }
+            discovered.extend(answers);
+        }
         if discovered.is_empty() && self.user_candidates.is_empty() {
             tracing::warn!(
                 host = %self.host,
@@ -333,6 +357,7 @@ mod tests {
             Arc::new(DohResolver::new()),
             user_candidates,
             derive_regions,
+            Vec::new(),
         )
     }
 
@@ -353,6 +378,48 @@ mod tests {
                 (ip(1), CandidateSource::UserConfigured),
             ]
         );
+    }
+
+    #[test]
+    fn discovery_domain_answers_are_merged_with_first_source_winning() {
+        // refresh() concatenates the host's DoH answers with each discovery
+        // domain's answers into `discovered`; collect_candidates then dedups
+        // against user candidates, with the earlier (DoH) source winning.
+        let mut discovered = vec![Ipv4Addr::new(151, 101, 1, 91)];
+        discovered.extend(vec![
+            Ipv4Addr::new(104, 16, 1, 1),
+            Ipv4Addr::new(151, 101, 1, 91),
+        ]);
+        let user = vec![
+            IpAddr::V4(Ipv4Addr::new(104, 16, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(151, 101, 1, 92)),
+        ];
+
+        let candidates = collect_candidates(&discovered, &user, false);
+
+        assert_eq!(
+            candidates,
+            vec![
+                (
+                    IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91)),
+                    CandidateSource::DnsDoh
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(104, 16, 1, 1)),
+                    CandidateSource::DnsDoh
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(151, 101, 1, 92)),
+                    CandidateSource::UserConfigured
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_returns_the_bound_host() {
+        let manager = make_manager(vec![], false);
+        assert_eq!(manager.host(), "cache.nixos.org");
     }
 
     #[test]

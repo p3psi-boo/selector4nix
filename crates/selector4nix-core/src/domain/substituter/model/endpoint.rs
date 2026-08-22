@@ -15,6 +15,27 @@ pub fn is_fastly_optimization_host(host: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EndpointOptimizationKind {
+    Fastly,
+    Cloudflare,
+}
+
+/// Determines which kind of endpoint optimization applies to a substituter
+/// host (independent of whether it is enabled; enablement lives in the
+/// configuration layer). Fastly: exact match against
+/// FASTLY_OPTIMIZATION_HOSTS; Cloudflare: host is `cachix.org` or ends with
+/// `.cachix.org`.
+pub fn endpoint_optimization_kind(host: &str) -> Option<EndpointOptimizationKind> {
+    if is_fastly_optimization_host(host) {
+        Some(EndpointOptimizationKind::Fastly)
+    } else if host == "cachix.org" || host.ends_with(".cachix.org") {
+        Some(EndpointOptimizationKind::Cloudflare)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CandidateSource {
     /// Resolved via DNS-over-HTTPS at runtime.
     DnsDoh,
@@ -237,5 +258,36 @@ mod tests {
     fn only_cache_nixos_org_is_eligible() {
         assert!(is_fastly_optimization_host("cache.nixos.org"));
         assert!(!is_fastly_optimization_host("other.example.com"));
+    }
+
+    #[test]
+    fn endpoint_optimization_kind_matches_fastly_hosts() {
+        assert_eq!(
+            endpoint_optimization_kind("cache.nixos.org"),
+            Some(EndpointOptimizationKind::Fastly)
+        );
+    }
+
+    #[test]
+    fn endpoint_optimization_kind_matches_cachix_hosts() {
+        assert_eq!(
+            endpoint_optimization_kind("nix-community.cachix.org"),
+            Some(EndpointOptimizationKind::Cloudflare)
+        );
+        assert_eq!(
+            endpoint_optimization_kind("foo.cachix.org"),
+            Some(EndpointOptimizationKind::Cloudflare)
+        );
+        assert_eq!(
+            endpoint_optimization_kind("cachix.org"),
+            Some(EndpointOptimizationKind::Cloudflare)
+        );
+    }
+
+    #[test]
+    fn endpoint_optimization_kind_rejects_other_hosts() {
+        assert_eq!(endpoint_optimization_kind("cachix.org.evil.com"), None);
+        assert_eq!(endpoint_optimization_kind("notcachix.org"), None);
+        assert_eq!(endpoint_optimization_kind("releases.nixos.org"), None);
     }
 }

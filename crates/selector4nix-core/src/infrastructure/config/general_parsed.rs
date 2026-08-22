@@ -8,11 +8,14 @@ use anyhow::{Context, Error as AnyhowError, Result as AnyhowResult};
 use crate::domain::common::url::Url;
 use crate::domain::nar_info::ResolutionPolicyOption;
 use crate::domain::nar_info::model::NarUrlRewriteOption;
-use crate::domain::substituter::model::{PeriodicProbingOption, Priority};
+use crate::domain::substituter::model::{
+    EndpointOptimizationKind, PeriodicProbingOption, Priority, endpoint_optimization_kind,
+};
 use crate::infrastructure::config::general_raw::{
     AppRawConfiguration, CacheInfoRawConfiguration, CacheRawConfiguration,
-    FastlyOptimizationRawConfiguration, NetworkRawConfiguration, ProxyRawConfiguration,
-    ServerRawConfiguration, SubstituterRawConfiguration,
+    CloudflareOptimizationRawConfiguration, FastlyOptimizationRawConfiguration,
+    NetworkRawConfiguration, ProxyRawConfiguration, ServerRawConfiguration,
+    SubstituterRawConfiguration,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,6 +27,7 @@ pub struct AppConfiguration {
     pub cache: CacheConfiguration,
     pub substituters: Vec<SubstituterConfiguration>,
     pub fastly_optimization: FastlyOptimizationConfiguration,
+    pub cloudflare_optimization: CloudflareOptimizationConfiguration,
 }
 
 impl AppConfiguration {
@@ -85,6 +89,18 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
                 "`fastly_optimization` requires a substituter with host `cache.nixos.org`"
             ));
         }
+        let cloudflare_optimization: CloudflareOptimizationConfiguration =
+            raw.cloudflare_optimization.unwrap_or_default().try_into()?;
+        if cloudflare_optimization.enabled
+            && !substituters.iter().any(|s| {
+                endpoint_optimization_kind(s.url.host())
+                    == Some(EndpointOptimizationKind::Cloudflare)
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "`cloudflare_optimization` requires a substituter with a `cachix.org` host"
+            ));
+        }
         Ok(Self {
             server: raw.server.try_into()?,
             network: raw.network.unwrap_or_default().try_into()?,
@@ -93,6 +109,7 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
             cache: raw.cache.unwrap_or_default().try_into()?,
             substituters,
             fastly_optimization,
+            cloudflare_optimization,
         })
     }
 }
@@ -280,6 +297,47 @@ impl TryFrom<FastlyOptimizationRawConfiguration> for FastlyOptimizationConfigura
             enabled: raw.enabled.unwrap_or(false),
             candidates,
             derive_regions: raw.derive_regions.unwrap_or(false),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CloudflareOptimizationConfiguration {
+    pub enabled: bool,
+    pub candidates: Vec<IpAddr>,
+    pub discovery_domains: Vec<String>,
+}
+
+impl Default for CloudflareOptimizationConfiguration {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidates: Vec::new(),
+            discovery_domains: default_cloudflare_discovery_domains(),
+        }
+    }
+}
+
+fn default_cloudflare_discovery_domains() -> Vec<String> {
+    vec!["cloudflare.182682.xyz".to_string()]
+}
+
+impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationConfiguration {
+    type Error = AnyhowError;
+
+    fn try_from(raw: CloudflareOptimizationRawConfiguration) -> Result<Self, Self::Error> {
+        let mut candidates = Vec::new();
+        for candidate in raw.candidates.unwrap_or_default() {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        Ok(Self {
+            enabled: raw.enabled.unwrap_or(false),
+            candidates,
+            discovery_domains: raw
+                .discovery_domains
+                .unwrap_or_else(default_cloudflare_discovery_domains),
         })
     }
 }

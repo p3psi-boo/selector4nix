@@ -14,19 +14,27 @@ use crate::domain::nar_file::model::NarFileLocation;
 use crate::domain::nar_file::port::{
     NarStreamData, NarStreamHeaders, NarStreamOpenAttempt, NarStreamProvider,
 };
-use crate::domain::substituter::model::{EndpointFailureKind, is_fastly_optimization_host};
+use crate::domain::substituter::model::{EndpointFailureKind, endpoint_optimization_kind};
 use crate::infrastructure::config::AppCredential;
 use crate::infrastructure::endpoint::manager::EndpointManager;
+use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
 
-/// Ordered usable endpoint IPs when `host` is eligible for endpoint
-/// optimization and the manager has usable endpoints. `None` means the
-/// caller falls back to the default client path.
-fn endpoint_ips_for(host: &str, manager: Option<&EndpointManager>) -> Option<Vec<IpAddr>> {
-    if !is_fastly_optimization_host(host) {
-        return None;
+/// The manager and its ordered usable endpoint IPs when `host` belongs to an
+/// endpoint optimization category, a manager is registered for it, and that
+/// manager has usable endpoints. `None` means the caller falls back to the
+/// default client path.
+fn endpoint_ips_for(
+    host: &str,
+    registry: &EndpointManagerRegistry,
+) -> Option<(Arc<EndpointManager>, Vec<IpAddr>)> {
+    endpoint_optimization_kind(host)?;
+    let manager = registry.for_host(host)?;
+    let ips = manager.ordered_usable();
+    if ips.is_empty() {
+        None
+    } else {
+        Some((manager, ips))
     }
-    let ips = manager?.ordered_usable();
-    if ips.is_empty() { None } else { Some(ips) }
 }
 
 /// reqwest 0.13 does not expose a dedicated TLS-certificate error kind, so
@@ -56,19 +64,19 @@ fn contains_certificate_keyword(text: &str) -> bool {
 pub struct ReqwestNarStreamProvider {
     client: Arc<StreamingClient>,
     credentials: Arc<AppCredential>,
-    endpoint_manager: Option<Arc<EndpointManager>>,
+    endpoint_managers: EndpointManagerRegistry,
 }
 
 impl ReqwestNarStreamProvider {
     pub fn new(
         client: Arc<StreamingClient>,
         credentials: Arc<AppCredential>,
-        endpoint_manager: Option<Arc<EndpointManager>>,
+        endpoint_managers: EndpointManagerRegistry,
     ) -> Self {
         Self {
             client,
             credentials,
-            endpoint_manager,
+            endpoint_managers,
         }
     }
 
@@ -118,27 +126,23 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
 
             let client = Arc::clone(&self.client);
             let credentials = Arc::clone(&self.credentials);
-            let endpoint_manager = self.endpoint_manager.clone();
+            let endpoint_managers = self.endpoint_managers.clone();
 
             set.spawn(async move {
                 // Endpoint-eligible locations try each usable endpoint in
                 // order; anything else uses the default client exactly once.
-                let clients: Vec<(Option<IpAddr>, Arc<StreamingClient>)> = endpoint_manager
-                    .as_ref()
-                    .and_then(|manager| {
-                        endpoint_ips_for(
-                            location.substituter().url().host(),
-                            Some(manager),
-                        )
-                        .map(|ips| {
-                            ips.into_iter()
-                                .filter_map(|ip| {
-                                    manager
-                                        .client_for(ip)
-                                        .map(|clients| (Some(ip), clients.streaming))
-                                })
-                                .collect::<Vec<_>>()
-                        })
+                let endpoint_plan =
+                    endpoint_ips_for(location.substituter().url().host(), &endpoint_managers);
+                let endpoint_manager = endpoint_plan.as_ref().map(|(manager, _)| Arc::clone(manager));
+                let clients: Vec<(Option<IpAddr>, Arc<StreamingClient>)> = endpoint_plan
+                    .map(|(manager, ips)| {
+                        ips.into_iter()
+                            .filter_map(|ip| {
+                                manager
+                                    .client_for(ip)
+                                    .map(|clients| (Some(ip), clients.streaming))
+                            })
+                            .collect::<Vec<_>>()
                     })
                     .filter(|clients| !clients.is_empty())
                     .unwrap_or_else(|| vec![(None, Arc::clone(&client))]);
@@ -304,22 +308,26 @@ mod tests {
             Arc::new(DohResolver::new()),
             user_candidates,
             false,
+            Vec::new(),
         )
     }
 
     #[test]
     fn non_whitelist_host_falls_back() {
-        assert!(endpoint_ips_for("releases.nixos.org", None).is_none());
+        assert!(
+            endpoint_ips_for("releases.nixos.org", &EndpointManagerRegistry::default()).is_none()
+        );
     }
 
     #[test]
     fn missing_manager_falls_back() {
-        assert!(endpoint_ips_for("cache.nixos.org", None).is_none());
+        assert!(endpoint_ips_for("cache.nixos.org", &EndpointManagerRegistry::default()).is_none());
     }
 
     #[test]
     fn empty_usable_endpoints_fall_back() {
         let manager = make_manager(Vec::new(), 1443);
-        assert!(endpoint_ips_for("cache.nixos.org", Some(&manager)).is_none());
+        let registry = EndpointManagerRegistry::new(vec![Arc::new(manager)]);
+        assert!(endpoint_ips_for("cache.nixos.org", &registry).is_none());
     }
 }

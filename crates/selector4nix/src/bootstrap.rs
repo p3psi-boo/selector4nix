@@ -33,11 +33,15 @@ use selector4nix_core::domain::nar_info::policy::{PreferencePolicy, TierPolicy};
 use selector4nix_core::domain::nar_info::{
     NarInfoResolutionPolicy, NarInfoService, ResolutionPolicyOption,
 };
-use selector4nix_core::domain::substituter::model::{Availability, Substituter, SubstituterMeta};
+use selector4nix_core::domain::substituter::model::{
+    Availability, EndpointOptimizationKind, Substituter, SubstituterMeta,
+    endpoint_optimization_kind,
+};
 use selector4nix_core::domain::substituter::{SubstituterRepository, SubstituterService};
 use selector4nix_core::infrastructure::config::{AppConfiguration, AppCredential};
 use selector4nix_core::infrastructure::dns::doh_resolver::DohResolver;
 use selector4nix_core::infrastructure::endpoint::manager::EndpointManager;
+use selector4nix_core::infrastructure::endpoint::registry::EndpointManagerRegistry;
 use selector4nix_core::infrastructure::metric::NarTransferMetric;
 use selector4nix_core::infrastructure::provider::*;
 use selector4nix_core::infrastructure::repository::*;
@@ -169,18 +173,12 @@ pub async fn init_context(
         }
     };
 
-    let (streaming_http_client, endpoint_manager) = if config.fastly_optimization.enabled {
-        let sub_config = config
-            .substituters
-            .iter()
-            .find(|sub_config| sub_config.url.host() == FASTLY_OPTIMIZATION_HOST)
-            .expect(
-                "config validation guarantees a `cache.nixos.org` substituter \
-                 when fastly optimization is enabled",
-            );
-        let base_url = sub_config.url.clone();
-        let port = base_url.inner().port_or_known_default().unwrap_or(443);
-
+    // Endpoint optimization assembles one `EndpointManager` per optimized
+    // host (fastly: cache.nixos.org; cloudflare: each cachix.org substituter
+    // host) and registers them all in one registry.
+    let (streaming_http_client, endpoint_managers) = if config.fastly_optimization.enabled
+        || config.cloudflare_optimization.enabled
+    {
         // The main streaming client and all endpoint-bound clients share one
         // throttler so that the per-host concurrency limit of the logical
         // host is enforced across endpoints.
@@ -196,45 +194,116 @@ pub async fn init_context(
         let factory_config = Arc::clone(config);
         let factory: Arc<dyn Fn() -> ClientBuilder + Send + Sync> =
             Arc::new(move || http_client_builder_factory(&factory_config));
-        let pool = Arc::new(EndpointClientPool::new(
-            FASTLY_OPTIMIZATION_HOST.to_string(),
-            port,
-            factory,
-            throttler,
-            config.network.chunked_streaming,
-            config.network.streaming_chunk_max_len,
-            config.network.streaming_window_max_len,
-            ENDPOINT_CLIENT_POOL_CAPACITY,
-        ));
-        let probing = Arc::new(EndpointProbingProvider::new(
-            Arc::clone(&pool),
-            config.network.nar_info_timeout,
-        ));
         let doh = Arc::new(DohResolver::new());
-        let manager = Arc::new(EndpointManager::new(
-            FASTLY_OPTIMIZATION_HOST.to_string(),
-            base_url,
-            pool,
-            probing,
-            doh,
-            config.fastly_optimization.candidates.clone(),
-            config.fastly_optimization.derive_regions,
-        ));
+        let mut managers: Vec<Arc<EndpointManager>> = Vec::new();
 
-        tracing::info!(
-            user_candidates = config.fastly_optimization.candidates.len(),
-            derive_regions = config.fastly_optimization.derive_regions,
-            "fastly optimization enabled for cache.nixos.org"
-        );
+        if config.fastly_optimization.enabled {
+            let sub_config = config
+                .substituters
+                .iter()
+                .find(|sub_config| sub_config.url.host() == FASTLY_OPTIMIZATION_HOST)
+                .expect(
+                    "config validation guarantees a `cache.nixos.org` substituter \
+                     when fastly optimization is enabled",
+                );
+            let base_url = sub_config.url.clone();
+            let port = base_url.inner().port_or_known_default().unwrap_or(443);
+
+            let pool = Arc::new(EndpointClientPool::new(
+                FASTLY_OPTIMIZATION_HOST.to_string(),
+                port,
+                Arc::clone(&factory),
+                Arc::clone(&throttler),
+                config.network.chunked_streaming,
+                config.network.streaming_chunk_max_len,
+                config.network.streaming_window_max_len,
+                ENDPOINT_CLIENT_POOL_CAPACITY,
+            ));
+            let probing = Arc::new(EndpointProbingProvider::new(
+                Arc::clone(&pool),
+                config.network.nar_info_timeout,
+            ));
+            let manager = Arc::new(EndpointManager::new(
+                FASTLY_OPTIMIZATION_HOST.to_string(),
+                base_url,
+                pool,
+                probing,
+                Arc::clone(&doh),
+                config.fastly_optimization.candidates.clone(),
+                config.fastly_optimization.derive_regions,
+                // Discovery domains are a cloudflare-only mechanism.
+                Vec::new(),
+            ));
+
+            tracing::info!(
+                user_candidates = config.fastly_optimization.candidates.len(),
+                derive_regions = config.fastly_optimization.derive_regions,
+                "fastly optimization enabled for cache.nixos.org"
+            );
+
+            managers.push(manager);
+        }
+
+        if config.cloudflare_optimization.enabled {
+            let mut seen_hosts = std::collections::HashSet::new();
+            for sub_config in &config.substituters {
+                let host = sub_config.url.host();
+                if endpoint_optimization_kind(host) != Some(EndpointOptimizationKind::Cloudflare)
+                    || !seen_hosts.insert(host.to_string())
+                {
+                    continue;
+                }
+                let base_url = sub_config.url.clone();
+                let port = base_url.inner().port_or_known_default().unwrap_or(443);
+
+                let pool = Arc::new(EndpointClientPool::new(
+                    host.to_string(),
+                    port,
+                    Arc::clone(&factory),
+                    Arc::clone(&throttler),
+                    config.network.chunked_streaming,
+                    config.network.streaming_chunk_max_len,
+                    config.network.streaming_window_max_len,
+                    ENDPOINT_CLIENT_POOL_CAPACITY,
+                ));
+                let probing = Arc::new(EndpointProbingProvider::new(
+                    Arc::clone(&pool),
+                    config.network.nar_info_timeout,
+                ));
+                let manager = Arc::new(EndpointManager::new(
+                    host.to_string(),
+                    base_url,
+                    pool,
+                    probing,
+                    Arc::clone(&doh),
+                    config.cloudflare_optimization.candidates.clone(),
+                    false,
+                    config.cloudflare_optimization.discovery_domains.clone(),
+                ));
+
+                tracing::info!(
+                    host,
+                    user_candidates = config.cloudflare_optimization.candidates.len(),
+                    discovery_domains = config.cloudflare_optimization.discovery_domains.len(),
+                    "cloudflare optimization enabled for cachix substituter"
+                );
+
+                managers.push(manager);
+            }
+        }
+
+        let endpoint_managers = EndpointManagerRegistry::new(managers);
 
         // Refresh endpoints immediately, then periodically with a small
         // jitter. `refresh` handles its own errors; the loop must never
         // terminate or propagate a panic to the main process.
         tokio::spawn({
-            let manager = Arc::clone(&manager);
+            let endpoint_managers = endpoint_managers.clone();
             async move {
                 loop {
-                    manager.refresh().await;
+                    for manager in endpoint_managers.managers() {
+                        manager.refresh().await;
+                    }
                     let jitter = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|since_epoch| {
@@ -249,7 +318,7 @@ pub async fn init_context(
             }
         });
 
-        (streaming_http_client, Some(manager))
+        (streaming_http_client, endpoint_managers)
     } else {
         (
             Arc::new(StreamingClient::new(
@@ -259,7 +328,7 @@ pub async fn init_context(
                 config.network.streaming_chunk_max_len,
                 config.network.streaming_window_max_len,
             )),
-            None,
+            EndpointManagerRegistry::default(),
         )
     };
 
@@ -267,13 +336,14 @@ pub async fn init_context(
         http_client.clone(),
         config.network.nar_info_timeout,
         credentials.clone(),
+        endpoint_managers.clone(),
     ));
 
     let nar_info_provider = Arc::new(ReqwestNarInfoProvider::new(
         http_client.clone(),
         config.network.nar_info_timeout,
         credentials.clone(),
-        endpoint_manager.clone(),
+        endpoint_managers.clone(),
     ));
 
     let nar_directory_provider = Arc::new(ReqwestNarDirectoryProvider::new(
@@ -284,7 +354,7 @@ pub async fn init_context(
     let nar_stream_provider = Arc::new(ReqwestNarStreamProvider::new(
         streaming_http_client,
         credentials.clone(),
-        endpoint_manager.clone(),
+        endpoint_managers.clone(),
     ));
 
     let nar_transfer_metric = Arc::new(NarTransferMetric::new());
@@ -443,7 +513,7 @@ pub async fn init_context(
         nar_info_registry.clone(),
         nar_transfer_metric.clone(),
         credentials,
-        endpoint_manager,
+        endpoint_managers,
         config.cache.nar_info_cache_capacity,
         has_persistent_cache,
     );

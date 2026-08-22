@@ -14,6 +14,7 @@ pub struct AppRawConfiguration {
     pub cache: Option<CacheRawConfiguration>,
     pub substituters: Vec<SubstituterRawConfiguration>,
     pub fastly_optimization: Option<FastlyOptimizationRawConfiguration>,
+    pub cloudflare_optimization: Option<CloudflareOptimizationRawConfiguration>,
 }
 
 impl AppRawConfiguration {
@@ -74,6 +75,14 @@ pub struct FastlyOptimizationRawConfiguration {
     pub enabled: Option<bool>,
     pub candidates: Option<Vec<IpAddr>>,
     pub derive_regions: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareOptimizationRawConfiguration {
+    pub enabled: Option<bool>,
+    pub candidates: Option<Vec<IpAddr>>,
+    pub discovery_domains: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]

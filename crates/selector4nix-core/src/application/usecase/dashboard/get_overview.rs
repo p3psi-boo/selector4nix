@@ -8,10 +8,10 @@ use crate::application::actor::nar_info::NarInfoActorRegistry;
 use crate::domain::common::url::Url;
 use crate::domain::substituter::SubstituterRepository;
 use crate::domain::substituter::model::{
-    Availability, CandidateSource, EndpointSnapshotStatus, Priority, is_fastly_optimization_host,
+    Availability, CandidateSource, EndpointSnapshotStatus, Priority, endpoint_optimization_kind,
 };
 use crate::infrastructure::config::AppCredential;
-use crate::infrastructure::endpoint::manager::EndpointManager;
+use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
 use crate::infrastructure::metric::NarTransferMetric;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -66,7 +66,7 @@ pub struct GetDashboardOverviewUseCase {
     nar_info_registry: Arc<NarInfoActorRegistry>,
     nar_transfer_metric: Arc<NarTransferMetric>,
     credentials: Arc<AppCredential>,
-    endpoint_manager: Option<Arc<EndpointManager>>,
+    endpoint_managers: EndpointManagerRegistry,
     nar_info_cache_capacity: NonZeroUsize,
     cache_mode: CacheMode,
 }
@@ -77,7 +77,7 @@ impl GetDashboardOverviewUseCase {
         nar_info_registry: Arc<NarInfoActorRegistry>,
         nar_transfer_metric: Arc<NarTransferMetric>,
         credentials: Arc<AppCredential>,
-        endpoint_manager: Option<Arc<EndpointManager>>,
+        endpoint_managers: EndpointManagerRegistry,
         nar_info_cache_capacity: NonZeroUsize,
         has_persistent_cache: bool,
     ) -> Self {
@@ -86,7 +86,7 @@ impl GetDashboardOverviewUseCase {
             nar_info_registry,
             nar_transfer_metric,
             credentials,
-            endpoint_manager,
+            endpoint_managers,
             nar_info_cache_capacity,
             cache_mode: if has_persistent_cache {
                 CacheMode::Persistent
@@ -132,15 +132,16 @@ impl GetDashboardOverviewUseCase {
         }
     }
 
-    /// Endpoint snapshot for the substituter, non-empty only when fastly
-    /// optimization applies to its host and an endpoint manager exists.
+    /// Endpoint snapshot for the substituter, non-empty only when its host
+    /// belongs to an endpoint optimization category and a manager is
+    /// registered for it.
     fn endpoints_for(&self, url: &Url) -> Vec<OverviewEndpointItemData> {
-        let Some(manager) = &self.endpoint_manager else {
-            return Vec::new();
-        };
-        if !is_fastly_optimization_host(url.host()) {
+        if endpoint_optimization_kind(url.host()).is_none() {
             return Vec::new();
         }
+        let Some(manager) = self.endpoint_managers.for_host(url.host()) else {
+            return Vec::new();
+        };
         manager
             .snapshot()
             .into_iter()

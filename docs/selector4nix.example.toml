@@ -53,6 +53,31 @@ candidates = []
 # Fastly addresses, see https://github.com/IrineSistiana/mosdns/discussions/511 (default: false).
 derive_regions = false
 
+# Cloudflare endpoint optimization for Cachix substituters (global section).
+# Only applies to substituters whose host is cachix.org or *.cachix.org;
+# enabling this requires such a substituter to be configured. Any Cloudflare
+# edge IP serves the correct certificate by SNI, so faster IPs can be
+# discovered via third-party optimized-IP domains. The URL, HTTP Host, and
+# TLS SNI always remain the substituter's own host with strict certificate
+# verification — only the TCP connection target IP is overridden (like
+# `curl --resolve`). Candidates come from DoH lookups of the substituter's
+# own domain, the discovery_domains below, and the candidates list. Each
+# candidate must pass an admission probe (TLS + GET /nix-cache-info returning
+# 200) before use. Endpoint requests bypass environment proxies; if no
+# endpoint is usable, requests fall back to the default system-DNS path,
+# behaving as if disabled.
+[cloudflare_optimization]
+# Whether to enable Cloudflare endpoint optimization (default: false).
+enabled = false
+# Additional seed endpoint candidates as IP literals; domain names are not accepted (default: []).
+candidates = []
+# Third-party domains whose DoH answers provide additional Cloudflare endpoint
+# candidates (default: ["cloudflare.182682.xyz"]). These lists are maintained
+# by third parties and may change or become unavailable; since every candidate
+# must pass the admission probe anyway, a stale domain merely yields fewer
+# candidates. Set to [] to disable this source.
+discovery_domains = ["cloudflare.182682.xyz"]
+
 # Proxy behavior settings.
 [proxy]
 # Whether to rewrite NAR URLs in NAR info responses (default: true).

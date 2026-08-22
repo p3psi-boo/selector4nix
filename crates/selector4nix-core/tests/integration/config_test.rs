@@ -206,3 +206,85 @@ candidates = ["cache.nixos.org"]
 
     assert!(result.is_err());
 }
+
+#[test]
+fn cloudflare_optimization_defaults_to_disabled() {
+    let config = AppConfiguration::deserialize(&make_config_string_minimal()).unwrap();
+
+    assert!(!config.cloudflare_optimization.enabled);
+    assert!(config.cloudflare_optimization.candidates.is_empty());
+    assert_eq!(
+        config.cloudflare_optimization.discovery_domains,
+        vec!["cloudflare.182682.xyz".to_string()],
+    );
+}
+
+#[test]
+fn cloudflare_optimization_is_parsed_when_enabled() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[[substituters]]
+url = "https://nix-community.cachix.org/"
+
+[cloudflare_optimization]
+enabled = true
+candidates = ["1.2.3.4"]
+discovery_domains = ["cf.example.com"]
+"#,
+    ))
+    .unwrap();
+
+    assert!(config.cloudflare_optimization.enabled);
+    assert_eq!(
+        config.cloudflare_optimization.candidates,
+        vec!["1.2.3.4".parse::<std::net::IpAddr>().unwrap()],
+    );
+    assert_eq!(
+        config.cloudflare_optimization.discovery_domains,
+        vec!["cf.example.com".to_string()],
+    );
+}
+
+#[test]
+fn cloudflare_optimization_requires_cachix_substituter() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_optimization]
+enabled = true
+"#,
+    ));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn cloudflare_optimization_explicit_empty_discovery_domains_stays_empty() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_optimization]
+discovery_domains = []
+"#,
+    ))
+    .unwrap();
+
+    assert!(config.cloudflare_optimization.discovery_domains.is_empty());
+}
+
+#[test]
+fn cloudflare_optimization_candidates_are_deduplicated() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_optimization]
+candidates = ["1.2.3.4", "5.6.7.8", "1.2.3.4"]
+"#,
+    ))
+    .unwrap();
+
+    assert_eq!(
+        config.cloudflare_optimization.candidates,
+        vec![
+            "1.2.3.4".parse::<std::net::IpAddr>().unwrap(),
+            "5.6.7.8".parse::<std::net::IpAddr>().unwrap(),
+        ],
+    );
+}

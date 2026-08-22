@@ -14,25 +14,33 @@ use crate::domain::common::url::Url;
 use crate::domain::nar_info::model::UpstreamNarInfoData;
 use crate::domain::nar_info::port::error_ctx::{OfflineSnafu, ServiceSnafu};
 use crate::domain::nar_info::port::{NarInfoProvider, NarInfoQueryData, QueryNarInfoError};
-use crate::domain::substituter::model::{EndpointFailureKind, is_fastly_optimization_host};
+use crate::domain::substituter::model::{EndpointFailureKind, endpoint_optimization_kind};
 use crate::infrastructure::config::AppCredential;
 use crate::infrastructure::endpoint::manager::EndpointManager;
+use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
 
-/// Ordered usable endpoint IPs when `host` is eligible for endpoint
-/// optimization and the manager has usable endpoints. `None` means the
-/// caller falls back to the default client path.
-fn endpoint_ips_for(host: &str, manager: Option<&EndpointManager>) -> Option<Vec<IpAddr>> {
-    if !is_fastly_optimization_host(host) {
-        return None;
+/// The manager and its ordered usable endpoint IPs when `host` belongs to an
+/// endpoint optimization category, a manager is registered for it, and that
+/// manager has usable endpoints. `None` means the caller falls back to the
+/// default client path.
+pub(crate) fn endpoint_ips_for(
+    host: &str,
+    registry: &EndpointManagerRegistry,
+) -> Option<(Arc<EndpointManager>, Vec<IpAddr>)> {
+    endpoint_optimization_kind(host)?;
+    let manager = registry.for_host(host)?;
+    let ips = manager.ordered_usable();
+    if ips.is_empty() {
+        None
+    } else {
+        Some((manager, ips))
     }
-    let ips = manager?.ordered_usable();
-    if ips.is_empty() { None } else { Some(ips) }
 }
 
 /// reqwest 0.13 does not expose a dedicated TLS-certificate error kind, so
 /// the error chain is scanned for certificate-related keywords (mirrors the
 /// admission-probing classification in `EndpointProbingProvider`).
-fn classify_endpoint_failure(error: &reqwest::Error) -> EndpointFailureKind {
+pub(crate) fn classify_endpoint_failure(error: &reqwest::Error) -> EndpointFailureKind {
     let mut looks_like_certificate = contains_certificate_keyword(&error.to_string());
     let mut source = error.source();
     while let Some(cause) = source {
@@ -57,7 +65,7 @@ pub struct ReqwestNarInfoProvider {
     client: Client,
     default_timeout: Duration,
     credentials: Arc<AppCredential>,
-    endpoint_manager: Option<Arc<EndpointManager>>,
+    endpoint_managers: EndpointManagerRegistry,
 }
 
 impl ReqwestNarInfoProvider {
@@ -65,13 +73,13 @@ impl ReqwestNarInfoProvider {
         client: Client,
         default_timeout: Duration,
         credentials: Arc<AppCredential>,
-        endpoint_manager: Option<Arc<EndpointManager>>,
+        endpoint_managers: EndpointManagerRegistry,
     ) -> Self {
         Self {
             client,
             default_timeout,
             credentials,
-            endpoint_manager,
+            endpoint_managers,
         }
     }
 
@@ -137,9 +145,7 @@ impl NarInfoProvider for ReqwestNarInfoProvider {
 
         let timeout = timeout.unwrap_or(self.default_timeout);
 
-        if let Some(manager) = &self.endpoint_manager
-            && let Some(ips) = endpoint_ips_for(url.host(), Some(manager))
-        {
+        if let Some((manager, ips)) = endpoint_ips_for(url.host(), &self.endpoint_managers) {
             for ip in ips {
                 let Some(clients) = manager.client_for(ip) else {
                     continue;
@@ -220,23 +226,27 @@ mod tests {
             Arc::new(DohResolver::new()),
             user_candidates,
             false,
+            Vec::new(),
         )
     }
 
     #[test]
     fn non_whitelist_host_falls_back() {
-        assert!(endpoint_ips_for("releases.nixos.org", None).is_none());
+        assert!(
+            endpoint_ips_for("releases.nixos.org", &EndpointManagerRegistry::default()).is_none()
+        );
     }
 
     #[test]
     fn missing_manager_falls_back() {
-        assert!(endpoint_ips_for("cache.nixos.org", None).is_none());
+        assert!(endpoint_ips_for("cache.nixos.org", &EndpointManagerRegistry::default()).is_none());
     }
 
     #[test]
     fn empty_usable_endpoints_fall_back() {
         let manager = make_manager(Vec::new(), 1443);
-        assert!(endpoint_ips_for("cache.nixos.org", Some(&manager)).is_none());
+        let registry = EndpointManagerRegistry::new(vec![Arc::new(manager)]);
+        assert!(endpoint_ips_for("cache.nixos.org", &registry).is_none());
     }
 
     /// Serve fixed HTTP 200 responses until `stop` is raised.
@@ -269,10 +279,11 @@ mod tests {
         spawn_ok_server(listener, Arc::clone(&stop));
 
         let ip1 = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let manager = make_manager(vec![ip1], port);
+        let manager = Arc::new(make_manager(vec![ip1], port));
         manager.refresh().await;
+        let registry = EndpointManagerRegistry::new(vec![Arc::clone(&manager)]);
 
-        let ips = endpoint_ips_for("cache.nixos.org", Some(&manager))
+        let (_, ips) = endpoint_ips_for("cache.nixos.org", &registry)
             .expect("admitted endpoints should be usable");
         assert_eq!(ips, vec![ip1]);
 
@@ -285,7 +296,7 @@ mod tests {
             Client::new(),
             Duration::from_millis(1500),
             Arc::new(AppCredential::empty()),
-            Some(Arc::new(manager)),
+            registry,
         );
         let url = Url::new(&format!("http://cache.nixos.org:{port}/deadbeef.narinfo")).unwrap();
 
@@ -301,7 +312,10 @@ mod tests {
             .await;
         assert!(result.is_err());
 
-        let manager = provider.endpoint_manager.as_ref().unwrap();
+        let manager = provider
+            .endpoint_managers
+            .for_host("cache.nixos.org")
+            .expect("the fastly manager is registered");
         assert!(
             manager.ordered_usable().is_empty(),
             "failed endpoints must be cooling and no longer usable"
