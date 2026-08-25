@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-23
+
 ### Added
 
 - Added `/{storePathHash}.ls` endpoint, which lists the recursive directory structure of a particular store path.
@@ -16,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
     - When its value is `"preference"`, the original resolution policy based on preference values that is calculated from latency and other metrics is used. This is the default policy.
     - When its value is `"tier"`, substituters are queried in strict priority tiers instead of all at once. Substituters of higher priority are queried first and those of lower priority are queried only after the former resolution doesn't succeed. Substituters of the same priority still race against each other.
     - The tiered policy might be useful for keeping traffic on preferred substituters and saving upstream bandwidth.
+- Added `/log/{deriver}` endpoint, which fetches the build log of a derivation.
 
 ### Changed
 
@@ -220,7 +223,8 @@ This is the first release of `selector4nix`, a Nix substituter proxy with parall
 
 <!-- Versions -->
 
-[Unreleased]: https://github.com/StarryReverie/selector4nix/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/StarryReverie/selector4nix/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/StarryReverie/selector4nix/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/StarryReverie/selector4nix/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/StarryReverie/selector4nix/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/StarryReverie/selector4nix/compare/v0.7.0...v0.8.0

@@ -3,6 +3,9 @@
   "extends": [
     "config:recommended"
   ],
+  "ignorePaths": [
+    "crates/selector4nix-workspace-hack/Cargo.toml"
+  ],
   "packageRules": [
     {
       "description": "Rust dependencies",
@@ -27,6 +30,11 @@
       "commitMessageAction": "bump",
       "commitMessageTopic": "Nix Flake input {{depName}}",
       "commitMessageExtra": "to {{newDigest}}"
+    },
+    {
+      "description": "Stop updating nixpkgs-nix-serve-ng digest in flake.nix",
+      "matchDepNames": ["nixpkgs-nix-serve-ng"],
+      "enabled": false
     }
   ],
   "nix": {
