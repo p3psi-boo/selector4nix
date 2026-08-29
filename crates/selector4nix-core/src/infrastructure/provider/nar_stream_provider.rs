@@ -14,20 +14,18 @@ use crate::domain::nar_file::model::NarFileLocation;
 use crate::domain::nar_file::port::{
     NarStreamData, NarStreamHeaders, NarStreamOpenAttempt, NarStreamProvider,
 };
-use crate::domain::substituter::model::{EndpointFailureKind, endpoint_optimization_kind};
+use crate::domain::substituter::model::EndpointFailureKind;
 use crate::infrastructure::config::AppCredential;
 use crate::infrastructure::endpoint::manager::EndpointManager;
 use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
 
-/// The manager and its ordered usable endpoint IPs when `host` belongs to an
-/// endpoint optimization category, a manager is registered for it, and that
-/// manager has usable endpoints. `None` means the caller falls back to the
-/// default client path.
+/// The manager and its ordered usable endpoint IPs when a manager is
+/// registered for `host` and it has usable endpoints. `None` means the caller
+/// falls back to the default client path.
 fn endpoint_ips_for(
     host: &str,
     registry: &EndpointManagerRegistry,
 ) -> Option<(Arc<EndpointManager>, Vec<IpAddr>)> {
-    endpoint_optimization_kind(host)?;
     let manager = registry.for_host(host)?;
     let ips = manager.ordered_usable();
     if ips.is_empty() {

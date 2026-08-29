@@ -13,10 +13,12 @@ use crate::domain::substituter::model::{
 };
 use crate::infrastructure::config::general_raw::{
     AppRawConfiguration, CacheInfoRawConfiguration, CacheRawConfiguration,
-    CloudflareOptimizationRawConfiguration, FastlyOptimizationRawConfiguration,
-    NetworkRawConfiguration, ProxyRawConfiguration, ServerRawConfiguration,
-    SubstituterRawConfiguration,
+    CloudflareCacheProxyRawConfiguration, CloudflareOptimizationRawConfiguration,
+    FastlyOptimizationRawConfiguration, NetworkRawConfiguration, ProxyRawConfiguration,
+    ServerRawConfiguration, SubstituterRawConfiguration,
 };
+
+const CACHE_NIXOS_ORG_HOST: &str = "cache.nixos.org";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppConfiguration {
@@ -28,6 +30,7 @@ pub struct AppConfiguration {
     pub substituters: Vec<SubstituterConfiguration>,
     pub fastly_optimization: FastlyOptimizationConfiguration,
     pub cloudflare_optimization: CloudflareOptimizationConfiguration,
+    pub cloudflare_cache_proxy: CloudflareCacheProxyConfiguration,
 }
 
 impl AppConfiguration {
@@ -68,48 +71,88 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
     type Error = AnyhowError;
 
     fn try_from(raw: AppRawConfiguration) -> Result<Self, Self::Error> {
-        if raw.substituters.is_empty() {
+        let AppRawConfiguration {
+            server,
+            network,
+            proxy,
+            cache_info,
+            cache,
+            substituters: raw_substituters,
+            fastly_optimization: raw_fastly_optimization,
+            cloudflare_optimization: raw_cloudflare_optimization,
+            cloudflare_cache_proxy: raw_cloudflare_cache_proxy,
+        } = raw;
+
+        if raw_substituters.is_empty() {
             return Err(anyhow::anyhow!(
                 "at least one substituter must be configured"
             ));
         }
-        let substituters = raw
-            .substituters
+        let mut substituters = raw_substituters
             .into_iter()
             .map(|c| c.try_into())
             .collect::<Result<Vec<SubstituterConfiguration>, _>>()?;
         let fastly_optimization: FastlyOptimizationConfiguration =
-            raw.fastly_optimization.unwrap_or_default().try_into()?;
+            raw_fastly_optimization.unwrap_or_default().try_into()?;
+        let cloudflare_cache_proxy: CloudflareCacheProxyConfiguration =
+            raw_cloudflare_cache_proxy.unwrap_or_default().try_into()?;
+
+        if fastly_optimization.enabled && cloudflare_cache_proxy.enabled {
+            return Err(anyhow::anyhow!(
+                "`fastly_optimization` and `cloudflare_cache_proxy` cannot both be enabled"
+            ));
+        }
+
         if fastly_optimization.enabled
             && !substituters
                 .iter()
-                .any(|s| s.url.host() == "cache.nixos.org")
+                .any(|s| s.url.host() == CACHE_NIXOS_ORG_HOST)
         {
             return Err(anyhow::anyhow!(
                 "`fastly_optimization` requires a substituter with host `cache.nixos.org`"
             ));
         }
+
+        if cloudflare_cache_proxy.enabled {
+            if !substituters
+                .iter()
+                .any(|s| s.url.host() == CACHE_NIXOS_ORG_HOST)
+            {
+                return Err(anyhow::anyhow!(
+                    "`cloudflare_cache_proxy` requires a substituter with host `cache.nixos.org`"
+                ));
+            }
+
+            for substituter in &mut substituters {
+                if substituter.url.host() == CACHE_NIXOS_ORG_HOST {
+                    substituter.url = cloudflare_cache_proxy.route(&substituter.url)?;
+                }
+            }
+        }
+
         let cloudflare_optimization: CloudflareOptimizationConfiguration =
-            raw.cloudflare_optimization.unwrap_or_default().try_into()?;
+            raw_cloudflare_optimization.unwrap_or_default().try_into()?;
         if cloudflare_optimization.enabled
+            && !cloudflare_cache_proxy.enabled
             && !substituters.iter().any(|s| {
                 endpoint_optimization_kind(s.url.host())
                     == Some(EndpointOptimizationKind::Cloudflare)
             })
         {
             return Err(anyhow::anyhow!(
-                "`cloudflare_optimization` requires a substituter with a `cachix.org` host"
+                "`cloudflare_optimization` requires a substituter with a `cachix.org` host or an enabled `cloudflare_cache_proxy`"
             ));
         }
         Ok(Self {
-            server: raw.server.try_into()?,
-            network: raw.network.unwrap_or_default().try_into()?,
-            proxy: raw.proxy.unwrap_or_default().try_into()?,
-            cache_info: raw.cache_info.unwrap_or_default().try_into()?,
-            cache: raw.cache.unwrap_or_default().try_into()?,
+            server: server.try_into()?,
+            network: network.unwrap_or_default().try_into()?,
+            proxy: proxy.unwrap_or_default().try_into()?,
+            cache_info: cache_info.unwrap_or_default().try_into()?,
+            cache: cache.unwrap_or_default().try_into()?,
             substituters,
             fastly_optimization,
             cloudflare_optimization,
+            cloudflare_cache_proxy,
         })
     }
 }
@@ -338,6 +381,73 @@ impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationC
             discovery_domains: raw
                 .discovery_domains
                 .unwrap_or_else(default_cloudflare_discovery_domains),
+        })
+    }
+}
+
+/// Routes requests for the official Nix cache through a Cloudflare-hosted
+/// reverse proxy. The configured URL is the proxy origin; requests are mapped
+/// to `/{scheme}/{host}/{path}` below that origin.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct CloudflareCacheProxyConfiguration {
+    pub enabled: bool,
+    pub url: Option<Url>,
+}
+
+impl CloudflareCacheProxyConfiguration {
+    fn route(&self, upstream: &Url) -> AnyhowResult<Url> {
+        let proxy_url = self
+            .url
+            .as_ref()
+            .expect("enabled cloudflare cache proxy has a validated URL");
+        let port = upstream
+            .inner()
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        let path = upstream.inner().path().trim_start_matches('/');
+        let route = format!(
+            "{}/{host}{port}/{path}",
+            upstream.inner().scheme(),
+            host = upstream.host(),
+        );
+
+        proxy_url
+            .as_dir()
+            .join(&route)
+            .map_err(AnyhowError::from)
+            .context("could not construct Cloudflare cache-proxy URL")
+    }
+}
+
+impl TryFrom<CloudflareCacheProxyRawConfiguration> for CloudflareCacheProxyConfiguration {
+    type Error = AnyhowError;
+
+    fn try_from(raw: CloudflareCacheProxyRawConfiguration) -> Result<Self, Self::Error> {
+        let url = raw.url.map(|value| Url::new(&value)).transpose()?;
+
+        if raw.enabled.unwrap_or(false) && url.is_none() {
+            return Err(anyhow::anyhow!(
+                "`cloudflare_cache_proxy.url` is required when `cloudflare_cache_proxy.enabled` is true"
+            ));
+        }
+
+        if let Some(url) = &url {
+            if url.inner().scheme() != "https" {
+                return Err(anyhow::anyhow!(
+                    "`cloudflare_cache_proxy.url` must use HTTPS"
+                ));
+            }
+            if url.inner().query().is_some() || url.inner().fragment().is_some() {
+                return Err(anyhow::anyhow!(
+                    "`cloudflare_cache_proxy.url` must not contain a query string or fragment"
+                ));
+            }
+        }
+
+        Ok(Self {
+            enabled: raw.enabled.unwrap_or(false),
+            url,
         })
     }
 }

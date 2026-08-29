@@ -105,6 +105,8 @@ Note that endpoint requests do not use HTTP(S)_PROXY or other environment proxie
 
 Enabling this section requires a substituter with host `cache.nixos.org` in the configuration; otherwise the server refuses to start.
 
+`fastly_optimization.enabled` and `cloudflare_cache_proxy.enabled` are mutually exclusive: they are two alternative acceleration paths for `cache.nixos.org`.
+
 ### `fastly_optimization.enabled`
 
 - Type: Boolean
@@ -126,11 +128,37 @@ Additional seed endpoint candidates as IP literals. Domain names are not accepte
 
 Whether to derive additional regional endpoint candidates from the discovered Fastly addresses (see [mosdns discussion #511](https://github.com/IrineSistiana/mosdns/discussions/511)).
 
+## `cloudflare_cache_proxy`
+
+Cloudflare reverse-proxy routing for the official Nix cache. This is a global section and does not belong to any single substituter.
+
+When enabled, every configured substituter whose host is `cache.nixos.org` is routed through the configured proxy origin. The proxy URL is constructed as `PROXY_URL/{scheme}/{host}/{path}`. For example, `https://cache.nixos.org/nar/example.nar.xz` becomes `https://YOUR-CLOUDFLARE-PROXY.example/https/cache.nixos.org/nar/example.nar.xz` when `url = "https://YOUR-CLOUDFLARE-PROXY.example/"`. NAR info, NAR files, health probes, and directory listing requests all use the same route.
+
+The original `https://cache.nixos.org/` entry remains in `[[substituters]]`; the rewrite happens during configuration loading. The section requires at least one such substituter. Its `url` must be an HTTPS origin without a query string or fragment.
+
+To select a preferred Cloudflare edge IP rather than relying on the proxy host's normal DNS result, also set `cloudflare_optimization.enabled = true`. This creates an endpoint manager for the reverse-proxy host and reuses the configured `cloudflare_optimization.candidates` and `cloudflare_optimization.discovery_domains` sources. Every candidate is admission-probed against the routed `nix-cache-info` endpoint before use.
+
+This option and `fastly_optimization.enabled` are mutually exclusive. Set exactly one of them to `true` to select the acceleration path for `cache.nixos.org`; both may be `false` to use the normal direct cache route.
+
+### `cloudflare_cache_proxy.enabled`
+
+- Type: Boolean
+- Default: `false`
+
+Whether to route `cache.nixos.org` requests through `cloudflare_cache_proxy.url`.
+
+### `cloudflare_cache_proxy.url`
+
+- Type: HTTPS URL
+- Default: unset
+
+Origin URL of the Cloudflare-hosted reverse proxy. Required when `enabled` is `true`. The value may include a path prefix, but must not include a query string or fragment.
+
 ## `cloudflare_optimization`
 
-Cloudflare endpoint optimization for Cachix substituters. This is a global section and does not belong to any single substituter.
+Cloudflare endpoint optimization for Cachix substituters and the optional Cloudflare cache reverse proxy. This is a global section and does not belong to any single substituter.
 
-When enabled, requests to substituters whose host is `cachix.org` or `*.cachix.org` are sent to Cloudflare edge endpoints discovered and probed at runtime, instead of relying on system DNS resolution. Unlike Fastly, any Cloudflare edge IP serves the correct certificate by SNI (verified in practice), so faster Cloudflare IPs can be discovered via third-party optimized-IP domains. The transport semantics are identical to `fastly_optimization`: only the TCP connection target IP is overridden (equivalent to `curl --resolve`); the request URL, the HTTP `Host` header, and the TLS SNI all remain the substituter's own host, and certificate verification is performed strictly as usual. Other substituters are unaffected.
+When enabled, requests to substituters whose host is `cachix.org` or `*.cachix.org`, plus the configured `cloudflare_cache_proxy` host when that proxy is enabled, are sent to Cloudflare edge endpoints discovered and probed at runtime instead of relying on system DNS resolution. Unlike Fastly, any Cloudflare edge IP serves the correct certificate by SNI (verified in practice), so faster Cloudflare IPs can be discovered via third-party optimized-IP domains. The transport semantics are identical to `fastly_optimization`: only the TCP connection target IP is overridden (equivalent to `curl --resolve`); the request URL, the HTTP `Host` header, and the TLS SNI all remain the substituter's own host, and certificate verification is performed strictly as usual. Other substituters are unaffected.
 
 Candidate endpoints come from three sources: DNS-over-HTTPS lookups of the substituter's own domain, DNS-over-HTTPS lookups of each domain in `discovery_domains`, and IP literals configured via `candidates`. There is no region derivation (that is Fastly-specific). As with `fastly_optimization`, every candidate — regardless of source — must pass an admission probe (a TLS handshake plus a `GET /nix-cache-info` request returning 200) before it is considered usable; usable endpoints are ordered by their admission latency, a failing endpoint automatically fails over to another endpoint of the same substituter, and if no endpoint is usable, requests fall back to the default path using system DNS.
 
@@ -138,7 +166,7 @@ The default `discovery_domains` entry, `cloudflare.182682.xyz`, is a third-party
 
 Endpoint requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. All Range requests of a chunked NAR download are pinned to the same endpoint, and the concurrency quota is still shared per logical host — same as `fastly_optimization`. Endpoint status is shown on the dashboard overview page.
 
-Enabling this section requires at least one substituter with host `cachix.org` or `*.cachix.org` in the configuration; otherwise the server refuses to start.
+Enabling this section requires at least one substituter with host `cachix.org` or `*.cachix.org`, or an enabled `cloudflare_cache_proxy`; otherwise the server refuses to start.
 
 ### `cloudflare_optimization.enabled`
 

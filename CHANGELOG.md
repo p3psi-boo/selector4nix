@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added `cloudflare_cache_proxy`, which routes configured `cache.nixos.org` substituters through a Cloudflare-hosted reverse proxy using the `/{scheme}/{host}/{path}` URL convention. The reverse-proxy host can reuse `cloudflare_optimization` endpoint discovery and admission probing. It is mutually exclusive with `fastly_optimization` so exactly one cache.nixos.org acceleration path can be enabled.
+
 ## [0.10.0] - 2026-08-23
 
 ### Added

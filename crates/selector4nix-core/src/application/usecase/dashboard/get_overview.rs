@@ -8,7 +8,7 @@ use crate::application::actor::nar_info::NarInfoActorRegistry;
 use crate::domain::common::url::Url;
 use crate::domain::substituter::SubstituterRepository;
 use crate::domain::substituter::model::{
-    Availability, CandidateSource, EndpointSnapshotStatus, Priority, endpoint_optimization_kind,
+    Availability, CandidateSource, EndpointSnapshotStatus, Priority,
 };
 use crate::infrastructure::config::AppCredential;
 use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
@@ -132,13 +132,9 @@ impl GetDashboardOverviewUseCase {
         }
     }
 
-    /// Endpoint snapshot for the substituter, non-empty only when its host
-    /// belongs to an endpoint optimization category and a manager is
-    /// registered for it.
+    /// Endpoint snapshot for the substituter, non-empty only when a manager
+    /// is registered for its host.
     fn endpoints_for(&self, url: &Url) -> Vec<OverviewEndpointItemData> {
-        if endpoint_optimization_kind(url.host()).is_none() {
-            return Vec::new();
-        }
         let Some(manager) = self.endpoint_managers.for_host(url.host()) else {
             return Vec::new();
         };

@@ -51,6 +51,16 @@ url = "https://selector4nix.cachix.org/"
 [[substituters]]
 url = "https://cache.garnix.io/"
 storage_url = "https://garnix-cache.com/" # Garnix doesn't serve NAR files on https://cache.garnix.io/nar/
+
+# Use this instead of [fastly_optimization] to route cache.nixos.org through
+# a Cloudflare-hosted reverse proxy. Enable cloudflare_optimization as well to
+# select a preferred Cloudflare edge IP for the proxy host.
+[cloudflare_cache_proxy]
+enabled = true
+url = "https://YOUR-CLOUDFLARE-PROXY.example/"
+
+[cloudflare_optimization]
+enabled = true
 ```
 
 For NixOS, nix-darwin, and Home Manager users, it is recommended to use the modules provided by this project for declarative setup and configuration.

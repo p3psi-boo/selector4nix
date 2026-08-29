@@ -175,8 +175,9 @@ pub async fn init_context(
     };
 
     // Endpoint optimization assembles one `EndpointManager` per optimized
-    // host (fastly: cache.nixos.org; cloudflare: each cachix.org substituter
-    // host) and registers them all in one registry.
+    // host (Fastly: cache.nixos.org; Cloudflare: Cachix substituters and the
+    // optional cache.nixos.org reverse-proxy host) and registers them all in
+    // one registry.
     let (streaming_http_client, endpoint_managers) = if config.fastly_optimization.enabled
         || config.cloudflare_optimization.enabled
     {
@@ -246,10 +247,20 @@ pub async fn init_context(
         }
 
         if config.cloudflare_optimization.enabled {
+            let cloudflare_cache_proxy_host = config.cloudflare_cache_proxy.enabled.then(|| {
+                config
+                    .cloudflare_cache_proxy
+                    .url
+                    .as_ref()
+                    .expect("enabled Cloudflare cache proxy has a validated URL")
+                    .host()
+            });
             let mut seen_hosts = std::collections::HashSet::new();
             for sub_config in &config.substituters {
                 let host = sub_config.url.host();
-                if endpoint_optimization_kind(host) != Some(EndpointOptimizationKind::Cloudflare)
+                let is_cloudflare_cache_proxy = cloudflare_cache_proxy_host == Some(host);
+                if (endpoint_optimization_kind(host) != Some(EndpointOptimizationKind::Cloudflare)
+                    && !is_cloudflare_cache_proxy)
                     || !seen_hosts.insert(host.to_string())
                 {
                     continue;
@@ -286,7 +297,7 @@ pub async fn init_context(
                     host,
                     user_candidates = config.cloudflare_optimization.candidates.len(),
                     discovery_domains = config.cloudflare_optimization.discovery_domains.len(),
-                    "cloudflare optimization enabled for cachix substituter"
+                    "cloudflare optimization enabled for substituter"
                 );
 
                 managers.push(manager);

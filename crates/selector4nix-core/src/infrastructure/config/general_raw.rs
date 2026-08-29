@@ -15,6 +15,7 @@ pub struct AppRawConfiguration {
     pub substituters: Vec<SubstituterRawConfiguration>,
     pub fastly_optimization: Option<FastlyOptimizationRawConfiguration>,
     pub cloudflare_optimization: Option<CloudflareOptimizationRawConfiguration>,
+    pub cloudflare_cache_proxy: Option<CloudflareCacheProxyRawConfiguration>,
 }
 
 impl AppRawConfiguration {
@@ -83,6 +84,15 @@ pub struct CloudflareOptimizationRawConfiguration {
     pub enabled: Option<bool>,
     pub candidates: Option<Vec<IpAddr>>,
     pub discovery_domains: Option<Vec<String>>,
+}
+
+/// A Cloudflare-hosted reverse proxy that exposes an upstream URL as
+/// `/{scheme}/{host}/{path}`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareCacheProxyRawConfiguration {
+    pub enabled: Option<bool>,
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]

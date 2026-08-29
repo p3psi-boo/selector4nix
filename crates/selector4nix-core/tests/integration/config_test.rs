@@ -63,6 +63,8 @@ fn defaults_are_applied_when_sections_omitted() {
     assert!(config.substituters[0].nar_info_timeout.is_none());
     assert!(config.substituters[0].nar_timeout.is_none());
     assert!(config.substituters[0].max_concurrent_requests.is_none());
+    assert!(!config.cloudflare_cache_proxy.enabled);
+    assert!(config.cloudflare_cache_proxy.url.is_none());
 }
 
 #[test]
@@ -287,4 +289,97 @@ candidates = ["1.2.3.4", "5.6.7.8", "1.2.3.4"]
             "5.6.7.8".parse::<std::net::IpAddr>().unwrap(),
         ],
     );
+}
+
+#[test]
+fn cloudflare_cache_proxy_routes_cache_nixos_org_through_proxy() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_cache_proxy]
+enabled = true
+url = "https://reverse-proxy.example/"
+
+[cloudflare_optimization]
+enabled = true
+"#,
+    ))
+    .unwrap();
+
+    assert!(config.cloudflare_cache_proxy.enabled);
+    assert_eq!(
+        config.cloudflare_cache_proxy.url.unwrap().value(),
+        "https://reverse-proxy.example/"
+    );
+    assert_eq!(
+        config.substituters[0].url.value(),
+        "https://reverse-proxy.example/https/cache.nixos.org/"
+    );
+    assert_eq!(
+        config.substituters[0]
+            .url
+            .as_dir()
+            .join("nar/example.nar.xz")
+            .unwrap()
+            .value(),
+        "https://reverse-proxy.example/https/cache.nixos.org/nar/example.nar.xz"
+    );
+}
+
+#[test]
+fn cloudflare_cache_proxy_requires_url_when_enabled() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_cache_proxy]
+enabled = true
+"#,
+    ));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn cloudflare_cache_proxy_requires_https_url() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_cache_proxy]
+url = "http://download.example.com/"
+"#,
+    ));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn cloudflare_cache_proxy_requires_cache_nixos_org_substituter() {
+    let result = AppConfiguration::deserialize(
+        r#"
+[server]
+ip = "127.0.0.1"
+
+[[substituters]]
+url = "https://mirror.example.com/"
+
+[cloudflare_cache_proxy]
+enabled = true
+url = "https://download.example.com/"
+"#,
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn fastly_and_cloudflare_cache_proxy_are_mutually_exclusive() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[fastly_optimization]
+enabled = true
+
+[cloudflare_cache_proxy]
+enabled = true
+url = "https://download.example.com/"
+"#,
+    ));
+
+    assert!(result.is_err());
 }
