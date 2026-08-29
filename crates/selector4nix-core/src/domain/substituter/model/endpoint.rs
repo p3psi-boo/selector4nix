@@ -39,6 +39,8 @@ pub fn endpoint_optimization_kind(host: &str) -> Option<EndpointOptimizationKind
 pub enum CandidateSource {
     /// Resolved via DNS-over-HTTPS at runtime.
     DnsDoh,
+    /// Loaded from a configured, externally maintained IP list.
+    ExternalList,
     /// Explicitly listed in the configuration.
     UserConfigured,
     /// Derived from another candidate via Fastly region patterns.
@@ -54,12 +56,40 @@ pub enum EndpointFailureKind {
     Certificate,
 }
 
+/// A bounded Range-download measurement for an admitted endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandwidthMeasurement {
+    pub time_to_first_byte: Duration,
+    pub bytes_per_second: u64,
+    pub sampled_at: Instant,
+}
+
+impl BandwidthMeasurement {
+    /// Estimate the time needed to transfer `bytes` through this endpoint.
+    /// The estimate includes TTFB so that a high-bandwidth but high-latency
+    /// endpoint does not dominate small NAR downloads.
+    pub fn estimated_download_time(&self, bytes: usize) -> Duration {
+        let bytes_per_second = u128::from(self.bytes_per_second.max(1));
+        let transfer_nanos = (bytes as u128)
+            .saturating_mul(1_000_000_000)
+            .checked_div(bytes_per_second)
+            .unwrap_or(u128::from(u64::MAX))
+            .min(u128::from(u64::MAX));
+        self.time_to_first_byte
+            .saturating_add(Duration::from_nanos(transfer_nanos as u64))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointState {
     /// Discovered but not yet admission-probed.
     Pending,
-    /// Passed TLS + HTTP admission; carries the admission request latency.
-    Usable { admission_latency: Duration },
+    /// Passed TLS + HTTP admission. The optional measurement is recorded by
+    /// the active Range-download benchmark.
+    Usable {
+        admission_latency: Duration,
+        bandwidth: Option<BandwidthMeasurement>,
+    },
     /// Transient failure; excluded from selection until the given instant.
     Cooling { until: Instant },
     /// Failed TLS admission; permanently excluded.
@@ -102,9 +132,26 @@ impl SubstituterEndpoint {
     }
 
     pub fn on_admission_success(&self, latency: Duration) -> Self {
+        let bandwidth = match self.state {
+            EndpointState::Usable { bandwidth, .. } => bandwidth,
+            _ => None,
+        };
         self.with_state(EndpointState::Usable {
             admission_latency: latency,
+            bandwidth,
         })
+    }
+
+    pub fn on_bandwidth_success(&self, measurement: BandwidthMeasurement) -> Self {
+        match self.state {
+            EndpointState::Usable {
+                admission_latency, ..
+            } => self.with_state(EndpointState::Usable {
+                admission_latency,
+                bandwidth: Some(measurement),
+            }),
+            _ => self.clone(),
+        }
     }
 
     pub fn on_failure(&self, kind: EndpointFailureKind, now: Instant) -> Self {
@@ -123,6 +170,19 @@ impl SubstituterEndpoint {
             EndpointState::Pending | EndpointState::Incompatible => false,
         }
     }
+
+    pub fn needs_bandwidth_probe(&self, now: Instant, refresh_interval: Duration) -> bool {
+        match self.state {
+            EndpointState::Usable {
+                bandwidth: Some(measurement),
+                ..
+            } => now.duration_since(measurement.sampled_at) >= refresh_interval,
+            EndpointState::Usable {
+                bandwidth: None, ..
+            } => true,
+            _ => false,
+        }
+    }
 }
 
 /// Point-in-time view of one endpoint for observability.
@@ -136,7 +196,10 @@ pub struct EndpointSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointSnapshotStatus {
     Pending,
-    Usable { admission_latency: Duration },
+    Usable {
+        admission_latency: Duration,
+        bandwidth: Option<BandwidthMeasurement>,
+    },
     Cooling,
     Incompatible,
 }
@@ -145,9 +208,13 @@ impl EndpointSnapshot {
     pub fn of(endpoint: &SubstituterEndpoint) -> Self {
         let status = match endpoint.state() {
             EndpointState::Pending => EndpointSnapshotStatus::Pending,
-            EndpointState::Usable { admission_latency } => {
-                EndpointSnapshotStatus::Usable { admission_latency }
-            }
+            EndpointState::Usable {
+                admission_latency,
+                bandwidth,
+            } => EndpointSnapshotStatus::Usable {
+                admission_latency,
+                bandwidth,
+            },
             EndpointState::Cooling { .. } => EndpointSnapshotStatus::Cooling,
             EndpointState::Incompatible => EndpointSnapshotStatus::Incompatible,
         };
@@ -159,8 +226,9 @@ impl EndpointSnapshot {
     }
 }
 
-/// Order endpoints for selection: usable ones first by admission latency,
-/// then pending ones (not yet probed), excluding cooling and incompatible.
+/// Order usable endpoints by their 10 MiB estimated download time when a
+/// bandwidth sample exists, falling back to admission latency otherwise.
+/// Cooling and incompatible endpoints are excluded.
 pub fn order_for_selection(
     endpoints: &[SubstituterEndpoint],
     now: Instant,
@@ -171,8 +239,15 @@ pub fn order_for_selection(
         .cloned()
         .collect();
     usable.sort_by_key(|e| match e.state() {
-        EndpointState::Usable { admission_latency } => admission_latency,
-        _ => Duration::MAX,
+        EndpointState::Usable {
+            admission_latency: _,
+            bandwidth: Some(measurement),
+        } => (0, measurement.estimated_download_time(10 * 1024 * 1024)),
+        EndpointState::Usable {
+            admission_latency,
+            bandwidth: None,
+        } => (1, admission_latency),
+        _ => (2, Duration::MAX),
     });
     usable
 }
@@ -199,12 +274,14 @@ mod tests {
                 1,
                 EndpointState::Usable {
                     admission_latency: Duration::from_millis(300),
+                    bandwidth: None,
                 },
             ),
             ep(
                 2,
                 EndpointState::Usable {
                     admission_latency: Duration::from_millis(100),
+                    bandwidth: None,
                 },
             ),
             ep(
@@ -242,6 +319,7 @@ mod tests {
             1,
             EndpointState::Usable {
                 admission_latency: Duration::from_millis(100),
+                bandwidth: None,
             },
         );
 
@@ -289,5 +367,54 @@ mod tests {
         assert_eq!(endpoint_optimization_kind("cachix.org.evil.com"), None);
         assert_eq!(endpoint_optimization_kind("notcachix.org"), None);
         assert_eq!(endpoint_optimization_kind("releases.nixos.org"), None);
+    }
+
+    #[test]
+    fn measured_endpoint_is_ordered_by_estimated_download_time() {
+        let now = Instant::now();
+        let fast_bandwidth = BandwidthMeasurement {
+            time_to_first_byte: Duration::from_millis(80),
+            bytes_per_second: 100 * 1024 * 1024,
+            sampled_at: now,
+        };
+        let endpoints = vec![
+            ep(
+                1,
+                EndpointState::Usable {
+                    admission_latency: Duration::from_millis(20),
+                    bandwidth: None,
+                },
+            ),
+            ep(
+                2,
+                EndpointState::Usable {
+                    admission_latency: Duration::from_millis(100),
+                    bandwidth: Some(fast_bandwidth),
+                },
+            ),
+        ];
+
+        let ordered = order_for_selection(&endpoints, now);
+        assert_eq!(ordered[0].ip(), IpAddr::V4(Ipv4Addr::new(151, 101, 1, 2)));
+    }
+
+    #[test]
+    fn bandwidth_probe_is_required_only_for_missing_or_expired_measurements() {
+        let now = Instant::now();
+        let fresh = ep(
+            1,
+            EndpointState::Usable {
+                admission_latency: Duration::from_millis(10),
+                bandwidth: Some(BandwidthMeasurement {
+                    time_to_first_byte: Duration::from_millis(10),
+                    bytes_per_second: 1,
+                    sampled_at: now,
+                }),
+            },
+        );
+        assert!(!fresh.needs_bandwidth_probe(now, Duration::from_secs(60)));
+        assert!(
+            fresh.needs_bandwidth_probe(now + Duration::from_secs(60), Duration::from_secs(60))
+        );
     }
 }

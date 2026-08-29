@@ -136,7 +136,7 @@ When enabled, every configured substituter whose host is `cache.nixos.org` is ro
 
 The original `https://cache.nixos.org/` entry remains in `[[substituters]]`; the rewrite happens during configuration loading. The section requires at least one such substituter. Its `url` must be an HTTPS origin without a query string or fragment.
 
-To select a preferred Cloudflare edge IP rather than relying on the proxy host's normal DNS result, also set `cloudflare_optimization.enabled = true`. This creates an endpoint manager for the reverse-proxy host and reuses the configured `cloudflare_optimization.candidates` and `cloudflare_optimization.discovery_domains` sources. Every candidate is admission-probed against the routed `nix-cache-info` endpoint before use.
+To select a preferred Cloudflare edge IP rather than relying on the proxy host's normal DNS result, also set `cloudflare_optimization.enabled = true`. This creates an endpoint manager for the reverse-proxy host and reuses the configured `cloudflare_optimization.candidates`, `cloudflare_optimization.discovery_domains`, and `cloudflare_optimization.external_ip_lists` sources. Every candidate is admission-probed against the routed `nix-cache-info` endpoint before use.
 
 This option and `fastly_optimization.enabled` are mutually exclusive. Set exactly one of them to `true` to select the acceleration path for `cache.nixos.org`; both may be `false` to use the normal direct cache route.
 
@@ -154,13 +154,56 @@ Whether to route `cache.nixos.org` requests through `cloudflare_cache_proxy.url`
 
 Origin URL of the Cloudflare-hosted reverse proxy. Required when `enabled` is `true`. The value may include a path prefix, but must not include a query string or fragment.
 
+### `cloudflare_cache_proxy.bandwidth_probe`
+
+An active, bounded Range-download benchmark for each newly admitted endpoint and for endpoints whose measurement is older than `refresh_secs`. It is only used for the Cloudflare cache-proxy host; Cachix substituters retain latency-only endpoint selection.
+
+The default sample is the immutable `nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst` object in `cache.nixos.org`, whose compressed size is larger than 10 MiB. The benchmark requests exactly the configured initial range with `Accept-Encoding: identity`, requires HTTP `206 Partial Content`, discards the received bytes, and never caches NAR content. It records TTFB and throughput; endpoints with a successful measurement are selected by their estimated 10 MiB download time, and unmeasured endpoints fall back to admission latency.
+
+At most two endpoint benchmarks run concurrently by default, and the default interval is six hours. A failed bandwidth benchmark leaves an endpoint admitted; only the existing TLS and `nix-cache-info` admission result controls usability.
+
+#### `cloudflare_cache_proxy.bandwidth_probe.enabled`
+
+- Type: Boolean
+- Default: `true`
+
+Whether active bandwidth benchmarking is enabled.
+
+#### `cloudflare_cache_proxy.bandwidth_probe.nar_path`
+
+- Type: Relative `nar/` Path
+- Default: `nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst`
+
+The sample NAR path. It must start with `nar/` and may not contain `..`, a query string, or a fragment.
+
+#### `cloudflare_cache_proxy.bandwidth_probe.bytes`
+
+- Type: Positive Integer
+- Default: `10485760`
+
+Number of bytes downloaded for each benchmark. The default is 10 MiB.
+
+#### `cloudflare_cache_proxy.bandwidth_probe.refresh_secs`
+
+- Type: Positive Integer
+- Default: `21600`
+
+Minimum age before an endpoint is benchmarked again.
+
+#### `cloudflare_cache_proxy.bandwidth_probe.max_concurrent_probes`
+
+- Type: Positive Integer
+- Default: `2`
+
+Maximum concurrent benchmark downloads for one Cloudflare cache-proxy host.
+
 ## `cloudflare_optimization`
 
 Cloudflare endpoint optimization for Cachix substituters and the optional Cloudflare cache reverse proxy. This is a global section and does not belong to any single substituter.
 
 When enabled, requests to substituters whose host is `cachix.org` or `*.cachix.org`, plus the configured `cloudflare_cache_proxy` host when that proxy is enabled, are sent to Cloudflare edge endpoints discovered and probed at runtime instead of relying on system DNS resolution. Unlike Fastly, any Cloudflare edge IP serves the correct certificate by SNI (verified in practice), so faster Cloudflare IPs can be discovered via third-party optimized-IP domains. The transport semantics are identical to `fastly_optimization`: only the TCP connection target IP is overridden (equivalent to `curl --resolve`); the request URL, the HTTP `Host` header, and the TLS SNI all remain the substituter's own host, and certificate verification is performed strictly as usual. Other substituters are unaffected.
 
-Candidate endpoints come from three sources: DNS-over-HTTPS lookups of the substituter's own domain, DNS-over-HTTPS lookups of each domain in `discovery_domains`, and IP literals configured via `candidates`. There is no region derivation (that is Fastly-specific). As with `fastly_optimization`, every candidate — regardless of source — must pass an admission probe (a TLS handshake plus a `GET /nix-cache-info` request returning 200) before it is considered usable; usable endpoints are ordered by their admission latency, a failing endpoint automatically fails over to another endpoint of the same substituter, and if no endpoint is usable, requests fall back to the default path using system DNS.
+Candidate endpoints come from four sources: DNS-over-HTTPS lookups of the substituter's own domain, DNS-over-HTTPS lookups of each domain in `discovery_domains`, plain-text endpoint lists in `external_ip_lists`, and IP literals configured via `candidates`. There is no region derivation (that is Fastly-specific). As with `fastly_optimization`, every candidate — regardless of source — must pass an admission probe (a TLS handshake plus a `GET /nix-cache-info` request returning 200) before it is considered usable. For a Cloudflare cache proxy with active benchmarking enabled, measured endpoints are then ordered by estimated download time; otherwise they are ordered by admission latency. A failing endpoint automatically fails over to another endpoint of the same substituter, and if no endpoint is usable, requests fall back to the default path using system DNS.
 
 The default `discovery_domains` entry, `cloudflare.182682.xyz`, is a third-party-maintained list of optimized Cloudflare IPs. It is not operated by this project and may change or become unavailable at any time; because every candidate must pass the admission probe anyway, a stale or dead discovery domain merely yields fewer candidates and never affects correctness.
 
@@ -188,6 +231,26 @@ Additional seed endpoint candidates as IP literals. Domain names are not accepte
 - Default: `["cloudflare.182682.xyz"]`
 
 Third-party domains whose DNS-over-HTTPS answers are used as additional Cloudflare endpoint candidates. Set to `[]` explicitly to disable this source.
+
+### `cloudflare_optimization.external_ip_lists`
+
+- Type: Array of Tables
+- Default: `[]`
+
+HTTPS URLs for externally maintained Cloudflare preferred-IP lists. Each response is parsed as UTF-8 plain text: one IPv4 or IPv6 address per line, with blank lines and text after `#` ignored. Domains, CIDRs, and `IP:port` entries are ignored. Results are deduplicated with DoH and configured candidates. The provider caches the most recent successful result in memory; if a refresh fails, that stale result remains usable but every IP is still admission-probed.
+
+#### `cloudflare_optimization.external_ip_lists[].url`
+
+- Type: HTTPS URL
+
+Location of the plain-text IP list.
+
+#### `cloudflare_optimization.external_ip_lists[].refresh_secs`
+
+- Type: Positive Integer
+- Default: `3600`
+
+How long the in-memory result is reused before fetching the list again. List refreshes are evaluated during the endpoint manager's approximately 30-minute refresh cycle, so shorter values take effect on that next cycle.
 
 ## `proxy`
 

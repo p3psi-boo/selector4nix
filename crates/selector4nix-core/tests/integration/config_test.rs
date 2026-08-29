@@ -219,6 +219,7 @@ fn cloudflare_optimization_defaults_to_disabled() {
         config.cloudflare_optimization.discovery_domains,
         vec!["cloudflare.182682.xyz".to_string()],
     );
+    assert!(config.cloudflare_optimization.external_ip_lists.is_empty());
 }
 
 #[test]
@@ -232,6 +233,9 @@ url = "https://nix-community.cachix.org/"
 enabled = true
 candidates = ["1.2.3.4"]
 discovery_domains = ["cf.example.com"]
+external_ip_lists = [
+  { url = "https://ips.example/cloudflare.txt", refresh_secs = 900 },
+]
 "#,
     ))
     .unwrap();
@@ -244,6 +248,17 @@ discovery_domains = ["cf.example.com"]
     assert_eq!(
         config.cloudflare_optimization.discovery_domains,
         vec!["cf.example.com".to_string()],
+    );
+    assert_eq!(config.cloudflare_optimization.external_ip_lists.len(), 1);
+    assert_eq!(
+        config.cloudflare_optimization.external_ip_lists[0]
+            .url
+            .value(),
+        "https://ips.example/cloudflare.txt"
+    );
+    assert_eq!(
+        config.cloudflare_optimization.external_ip_lists[0].refresh_interval,
+        Duration::from_secs(900)
     );
 }
 
@@ -292,6 +307,21 @@ candidates = ["1.2.3.4", "5.6.7.8", "1.2.3.4"]
 }
 
 #[test]
+fn cloudflare_external_ip_list_requires_https() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[[substituters]]
+url = "https://nix-community.cachix.org/"
+
+[cloudflare_optimization]
+external_ip_lists = [{ url = "http://ips.example/cloudflare.txt" }]
+"#,
+    ));
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn cloudflare_cache_proxy_routes_cache_nixos_org_through_proxy() {
     let config = AppConfiguration::deserialize(&make_config_string_overriden(
         r#"
@@ -322,6 +352,18 @@ enabled = true
             .unwrap()
             .value(),
         "https://reverse-proxy.example/https/cache.nixos.org/nar/example.nar.xz"
+    );
+    assert!(config.cloudflare_cache_proxy.bandwidth_probe.enabled);
+    assert_eq!(
+        config.cloudflare_cache_proxy.bandwidth_probe.bytes.get(),
+        10 * 1024 * 1024
+    );
+    assert_eq!(
+        config
+            .cloudflare_cache_proxy
+            .bandwidth_probe
+            .refresh_interval,
+        Duration::from_secs(6 * 60 * 60)
     );
 }
 
@@ -378,6 +420,22 @@ enabled = true
 [cloudflare_cache_proxy]
 enabled = true
 url = "https://download.example.com/"
+"#,
+    ));
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn cloudflare_cache_proxy_bandwidth_probe_rejects_non_nar_path() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[cloudflare_cache_proxy]
+enabled = true
+url = "https://reverse-proxy.example/"
+
+[cloudflare_cache_proxy.bandwidth_probe]
+nar_path = "https://other.example/nar/probe.nar.zst"
 "#,
     ));
 

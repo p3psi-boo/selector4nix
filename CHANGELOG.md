@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 ### Added
 
 - Added `cloudflare_cache_proxy`, which routes configured `cache.nixos.org` substituters through a Cloudflare-hosted reverse proxy using the `/{scheme}/{host}/{path}` URL convention. The reverse-proxy host can reuse `cloudflare_optimization` endpoint discovery and admission probing. It is mutually exclusive with `fastly_optimization` so exactly one cache.nixos.org acceleration path can be enabled.
+- Added active Cloudflare cache-proxy endpoint benchmarks: newly admitted or stale endpoints download a bounded 10 MiB Range from an immutable, larger cache.nixos.org NAR and are ranked by estimated download time. NAR bytes are discarded rather than cached.
+- Added `cloudflare_optimization.external_ip_lists` for HTTPS plain-text external preferred-IP lists, including blank-line and inline-comment filtering, in-memory refresh caching, and normal TLS/HTTP admission for every resulting IP.
 
 ## [0.10.0] - 2026-08-23
 

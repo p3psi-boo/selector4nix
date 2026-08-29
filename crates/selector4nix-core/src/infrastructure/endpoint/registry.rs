@@ -45,7 +45,9 @@ mod tests {
     use super::*;
     use crate::domain::common::url::Url;
     use crate::infrastructure::dns::doh_resolver::DohResolver;
-    use crate::infrastructure::provider::{EndpointClientPool, EndpointProbingProvider};
+    use crate::infrastructure::provider::{
+        EndpointClientPool, EndpointProbingProvider, ExternalIpListProvider,
+    };
 
     fn make_manager(host: &str) -> Arc<EndpointManager> {
         let pool = Arc::new(EndpointClientPool::new(
@@ -73,6 +75,9 @@ mod tests {
             Vec::<IpAddr>::new(),
             false,
             Vec::new(),
+            Vec::new(),
+            Arc::new(ExternalIpListProvider::new()),
+            None,
         ))
     }
 

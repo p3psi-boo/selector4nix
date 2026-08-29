@@ -59,8 +59,13 @@ storage_url = "https://garnix-cache.com/" # Garnix doesn't serve NAR files on ht
 enabled = true
 url = "https://YOUR-CLOUDFLARE-PROXY.example/"
 
+[cloudflare_cache_proxy.bandwidth_probe]
+# 10 MiB HTTP Range benchmark; selects measured endpoints by throughput + TTFB.
+enabled = true
+
 [cloudflare_optimization]
 enabled = true
+# external_ip_lists = [{ url = "https://IP-LIST-SOURCE.example/cloudflare.txt" }]
 ```
 
 For NixOS, nix-darwin, and Home Manager users, it is recommended to use the modules provided by this project for declarative setup and configuration.

@@ -68,6 +68,22 @@ enabled = false
 # fragment. Required only when enabled = true; no default is configured.
 # url = "https://YOUR-CLOUDFLARE-PROXY.example/"
 
+# Active Range-download benchmark for every newly admitted or expired endpoint
+# of cloudflare_cache_proxy. It downloads only a bounded byte range of an
+# immutable cache.nixos.org NAR that is larger than 10 MiB; NAR content is not
+# cached. The measured TTFB and MiB/s determine endpoint order.
+[cloudflare_cache_proxy.bandwidth_probe]
+# Whether to actively benchmark cache-proxy endpoints (default: true).
+enabled = true
+# Relative NAR path used for the Range request. It must begin with nar/.
+nar_path = "nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst"
+# Number of bytes downloaded per benchmark (default: 10485760 = 10 MiB).
+bytes = 10485760
+# Re-benchmark an endpoint after this interval (default: 21600 = 6 hours).
+refresh_secs = 21600
+# Maximum simultaneous benchmark downloads (default: 2).
+max_concurrent_probes = 2
+
 # Cloudflare endpoint optimization for Cachix substituters and the optional
 # cloudflare_cache_proxy host (global section). Enable this together with
 # cloudflare_cache_proxy to discover, admission-probe, and select the fastest
@@ -93,6 +109,13 @@ candidates = []
 # must pass the admission probe anyway, a stale domain merely yields fewer
 # candidates. Set to [] to disable this source.
 discovery_domains = ["cloudflare.182682.xyz"]
+# Optional HTTPS plain-text IP lists. One IPv4 or IPv6 address per line;
+# blank lines, full-line comments, and inline # comments are ignored. Domains,
+# CIDRs, and IP:port entries are rejected. The last successful list stays in
+# memory when a refresh fails, but each listed IP still needs admission.
+# external_ip_lists = [
+#   { url = "https://IP-LIST-SOURCE.example/cloudflare.txt", refresh_secs = 3600 },
+# ]
 
 # Proxy behavior settings.
 [proxy]

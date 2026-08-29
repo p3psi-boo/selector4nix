@@ -84,6 +84,15 @@ pub struct CloudflareOptimizationRawConfiguration {
     pub enabled: Option<bool>,
     pub candidates: Option<Vec<IpAddr>>,
     pub discovery_domains: Option<Vec<String>>,
+    pub external_ip_lists: Option<Vec<ExternalIpListRawConfiguration>>,
+}
+
+/// A remotely maintained list of Cloudflare endpoint IPs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalIpListRawConfiguration {
+    pub url: String,
+    pub refresh_secs: Option<NonZeroU64>,
 }
 
 /// A Cloudflare-hosted reverse proxy that exposes an upstream URL as
@@ -93,6 +102,18 @@ pub struct CloudflareOptimizationRawConfiguration {
 pub struct CloudflareCacheProxyRawConfiguration {
     pub enabled: Option<bool>,
     pub url: Option<String>,
+    pub bandwidth_probe: Option<BandwidthProbeRawConfiguration>,
+}
+
+/// An active HTTP Range-download benchmark for a Cloudflare cache proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BandwidthProbeRawConfiguration {
+    pub enabled: Option<bool>,
+    pub nar_path: Option<String>,
+    pub bytes: Option<NonZeroUsize>,
+    pub refresh_secs: Option<NonZeroU64>,
+    pub max_concurrent_probes: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize)]

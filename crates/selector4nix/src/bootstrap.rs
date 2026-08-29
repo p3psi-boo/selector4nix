@@ -197,6 +197,7 @@ pub async fn init_context(
         let factory: Arc<dyn Fn() -> ClientBuilder + Send + Sync> =
             Arc::new(move || http_client_builder_factory(&factory_config));
         let doh = Arc::new(DohResolver::new());
+        let external_ip_lists = Arc::new(ExternalIpListProvider::new());
         let mut managers: Vec<Arc<EndpointManager>> = Vec::new();
 
         if config.fastly_optimization.enabled {
@@ -235,6 +236,11 @@ pub async fn init_context(
                 config.fastly_optimization.derive_regions,
                 // Discovery domains are a cloudflare-only mechanism.
                 Vec::new(),
+                // External IP lists and active bandwidth probes are
+                // Cloudflare-cache-proxy-only mechanisms.
+                Vec::new(),
+                Arc::clone(&external_ip_lists),
+                None,
             ));
 
             tracing::info!(
@@ -291,12 +297,19 @@ pub async fn init_context(
                     config.cloudflare_optimization.candidates.clone(),
                     false,
                     config.cloudflare_optimization.discovery_domains.clone(),
+                    config.cloudflare_optimization.external_ip_lists.clone(),
+                    Arc::clone(&external_ip_lists),
+                    is_cloudflare_cache_proxy
+                        .then(|| config.cloudflare_cache_proxy.bandwidth_probe.clone()),
                 ));
 
                 tracing::info!(
                     host,
                     user_candidates = config.cloudflare_optimization.candidates.len(),
                     discovery_domains = config.cloudflare_optimization.discovery_domains.len(),
+                    external_ip_lists = config.cloudflare_optimization.external_ip_lists.len(),
+                    active_bandwidth_probe = is_cloudflare_cache_proxy
+                        && config.cloudflare_cache_proxy.bandwidth_probe.enabled,
                     "cloudflare optimization enabled for substituter"
                 );
 

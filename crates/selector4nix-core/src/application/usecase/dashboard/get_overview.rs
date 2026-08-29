@@ -145,13 +145,26 @@ impl GetDashboardOverviewUseCase {
                 ip: snapshot.ip,
                 source: match snapshot.source {
                     CandidateSource::DnsDoh => "DoH",
+                    CandidateSource::ExternalList => "external list",
                     CandidateSource::UserConfigured => "configured",
                     CandidateSource::DerivedRegion => "derived",
                 }
                 .to_string(),
                 status: match snapshot.status {
-                    EndpointSnapshotStatus::Usable { admission_latency } => {
-                        format!("Usable ({}ms)", admission_latency.as_millis())
+                    EndpointSnapshotStatus::Usable {
+                        admission_latency,
+                        bandwidth,
+                    } => {
+                        if let Some(bandwidth) = bandwidth {
+                            format!(
+                                "Usable (admission {}ms, TTFB {}ms, {:.1} MiB/s)",
+                                admission_latency.as_millis(),
+                                bandwidth.time_to_first_byte.as_millis(),
+                                bandwidth.bytes_per_second as f64 / (1024.0 * 1024.0),
+                            )
+                        } else {
+                            format!("Usable (admission {}ms)", admission_latency.as_millis())
+                        }
                     }
                     EndpointSnapshotStatus::Pending => "Pending".to_string(),
                     EndpointSnapshotStatus::Cooling => "Cooling".to_string(),

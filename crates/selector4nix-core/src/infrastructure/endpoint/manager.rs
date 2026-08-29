@@ -14,10 +14,12 @@ use crate::domain::substituter::model::{
     CandidateSource, EndpointFailureKind, EndpointSnapshot, EndpointSnapshotStatus, EndpointState,
     SubstituterEndpoint, order_for_selection,
 };
+use crate::infrastructure::config::{BandwidthProbeConfiguration, ExternalIpListConfiguration};
 use crate::infrastructure::dns::doh_resolver::DohResolver;
 use crate::infrastructure::fastly::region_derivation::derive_region_candidates;
 use crate::infrastructure::provider::{
-    EndpointClientPool, EndpointClientSet, EndpointProbingProvider, ProbeEndpointError,
+    EndpointClientPool, EndpointClientSet, EndpointProbingProvider, ExternalIpListProvider,
+    ProbeEndpointError,
 };
 
 /// Maximum number of endpoints admission-probed concurrently during refresh.
@@ -28,6 +30,7 @@ const PROBE_CONCURRENCY: usize = 8;
 /// derived regions) wins.
 fn collect_candidates(
     discovered: &[Ipv4Addr],
+    externally_discovered: &[IpAddr],
     user_candidates: &[IpAddr],
     derive_regions: bool,
 ) -> Vec<(IpAddr, CandidateSource)> {
@@ -47,6 +50,14 @@ fn collect_candidates(
         push(
             IpAddr::V4(*ip),
             CandidateSource::DnsDoh,
+            &mut candidates,
+            &mut seen,
+        );
+    }
+    for ip in externally_discovered {
+        push(
+            *ip,
+            CandidateSource::ExternalList,
             &mut candidates,
             &mut seen,
         );
@@ -91,6 +102,11 @@ pub struct EndpointManager {
     /// Third-party optimization domains whose DoH A records are added to the
     /// candidates (e.g. a Cloudflare preferred-IP domain); empty for Fastly.
     discovery_domains: Vec<String>,
+    /// Plain-text remote lists of Cloudflare endpoint IPs.
+    external_ip_lists: Vec<ExternalIpListConfiguration>,
+    external_ip_list_provider: Arc<ExternalIpListProvider>,
+    /// Optional active Range-download benchmark for a known-large NAR.
+    bandwidth_probe: Option<BandwidthProbeConfiguration>,
     /// First endpoint of the previous selection order, for change logging.
     last_selected: Mutex<Option<IpAddr>>,
 }
@@ -106,6 +122,9 @@ impl EndpointManager {
         user_candidates: Vec<IpAddr>,
         derive_regions: bool,
         discovery_domains: Vec<String>,
+        external_ip_lists: Vec<ExternalIpListConfiguration>,
+        external_ip_list_provider: Arc<ExternalIpListProvider>,
+        bandwidth_probe: Option<BandwidthProbeConfiguration>,
     ) -> Self {
         Self {
             endpoints: DashMap::new(),
@@ -117,6 +136,9 @@ impl EndpointManager {
             user_candidates,
             derive_regions,
             discovery_domains,
+            external_ip_lists,
+            external_ip_list_provider,
+            bandwidth_probe,
             last_selected: Mutex::new(None),
         }
     }
@@ -142,14 +164,25 @@ impl EndpointManager {
             }
             discovered.extend(answers);
         }
-        if discovered.is_empty() && self.user_candidates.is_empty() {
+        let mut externally_discovered = Vec::new();
+        for list in &self.external_ip_lists {
+            externally_discovered.extend(self.external_ip_list_provider.endpoints(list).await);
+        }
+        if discovered.is_empty()
+            && externally_discovered.is_empty()
+            && self.user_candidates.is_empty()
+        {
             tracing::warn!(
                 host = %self.host,
                 "endpoint discovery yielded no candidates; keeping existing endpoints"
             );
         }
-        let candidates =
-            collect_candidates(&discovered, &self.user_candidates, self.derive_regions);
+        let candidates = collect_candidates(
+            &discovered,
+            &externally_discovered,
+            &self.user_candidates,
+            self.derive_regions,
+        );
 
         for (ip, source) in &candidates {
             self.endpoints
@@ -206,6 +239,8 @@ impl EndpointManager {
             self.endpoints.insert(endpoint.ip(), updated);
         }
 
+        self.benchmark_endpoints().await;
+
         self.update_selected();
 
         let usable: Vec<String> = self
@@ -213,7 +248,9 @@ impl EndpointManager {
             .into_iter()
             .map(|ip| {
                 let latency = match self.endpoints.get(&ip).map(|e| e.state()) {
-                    Some(EndpointState::Usable { admission_latency }) => {
+                    Some(EndpointState::Usable {
+                        admission_latency, ..
+                    }) => {
                         format!("{admission_latency:?}")
                     }
                     _ => "?".to_string(),
@@ -230,7 +267,55 @@ impl EndpointManager {
         );
     }
 
-    /// Currently usable endpoints ordered by admission latency, ascending.
+    async fn benchmark_endpoints(&self) {
+        let Some(config) = self
+            .bandwidth_probe
+            .as_ref()
+            .filter(|config| config.enabled)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let pending: Vec<SubstituterEndpoint> = self
+            .endpoints
+            .iter()
+            .filter(|entry| entry.needs_bandwidth_probe(now, config.refresh_interval))
+            .map(|entry| entry.value().clone())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+
+        let results = futures::stream::iter(pending.into_iter().map(|endpoint| {
+            let probing = Arc::clone(&self.probing);
+            let base_url = self.base_url.clone();
+            let config = config.clone();
+            async move {
+                let result = probing
+                    .benchmark_endpoint(&base_url, endpoint.ip(), &config)
+                    .await;
+                (endpoint.ip(), result)
+            }
+        }))
+        .buffer_unordered(config.max_concurrent_probes.get())
+        .collect::<Vec<_>>()
+        .await;
+
+        for (ip, result) in results {
+            match result {
+                Ok(measurement) => {
+                    if let Some(mut endpoint) = self.endpoints.get_mut(&ip) {
+                        *endpoint.value_mut() = endpoint.on_bandwidth_success(measurement);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(%ip, %error, "endpoint bandwidth benchmark failed");
+                }
+            }
+        }
+    }
+
+    /// Currently usable endpoints ordered by bandwidth-aware selection score.
     /// Empty when none are usable; callers then fall back to the default path.
     pub fn ordered_usable(&self) -> Vec<IpAddr> {
         let endpoints: Vec<SubstituterEndpoint> = self
@@ -259,15 +344,22 @@ impl EndpointManager {
         }
     }
 
-    /// All known endpoints, usable ones first ordered by admission latency,
+    /// All known endpoints, usable ones first ordered by the active selection score,
     /// then pending, then cooling, then incompatible.
     pub fn snapshot(&self) -> Vec<EndpointSnapshot> {
         fn rank(status: &EndpointSnapshotStatus) -> (u8, Duration) {
             match status {
-                EndpointSnapshotStatus::Usable { admission_latency } => (0, *admission_latency),
-                EndpointSnapshotStatus::Pending => (1, Duration::ZERO),
-                EndpointSnapshotStatus::Cooling => (2, Duration::ZERO),
-                EndpointSnapshotStatus::Incompatible => (3, Duration::ZERO),
+                EndpointSnapshotStatus::Usable {
+                    bandwidth: Some(measurement),
+                    ..
+                } => (0, measurement.estimated_download_time(10 * 1024 * 1024)),
+                EndpointSnapshotStatus::Usable {
+                    admission_latency,
+                    bandwidth: None,
+                } => (1, *admission_latency),
+                EndpointSnapshotStatus::Pending => (2, Duration::ZERO),
+                EndpointSnapshotStatus::Cooling => (3, Duration::ZERO),
+                EndpointSnapshotStatus::Incompatible => (4, Duration::ZERO),
             }
         }
         let mut snapshots: Vec<EndpointSnapshot> = self
@@ -291,7 +383,9 @@ impl EndpointManager {
         }
         if let (Some(previous), Some(current)) = (*last, selected) {
             let latency_of = |ip: IpAddr| match self.endpoints.get(&ip).map(|e| e.state()) {
-                Some(EndpointState::Usable { admission_latency }) => {
+                Some(EndpointState::Usable {
+                    admission_latency, ..
+                }) => {
                     format!("{admission_latency:?}")
                 }
                 _ => "?".to_string(),
@@ -326,7 +420,7 @@ mod tests {
     use selector4nix_streaming::throttler::{PerHostHttpThrottler, ThrottlingOptions};
 
     use super::*;
-    use crate::infrastructure::provider::EndpointProbingProvider;
+    use crate::infrastructure::provider::{EndpointProbingProvider, ExternalIpListProvider};
 
     fn ip(octet: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(151, 101, 1, octet))
@@ -358,6 +452,9 @@ mod tests {
             user_candidates,
             derive_regions,
             Vec::new(),
+            Vec::new(),
+            Arc::new(ExternalIpListProvider::new()),
+            None,
         )
     }
 
@@ -366,7 +463,7 @@ mod tests {
         let discovered = vec![Ipv4Addr::new(151, 101, 1, 91)];
         let user = vec![IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91)), ip(1)];
 
-        let candidates = collect_candidates(&discovered, &user, false);
+        let candidates = collect_candidates(&discovered, &[], &user, false);
 
         assert_eq!(
             candidates,
@@ -395,7 +492,7 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(151, 101, 1, 92)),
         ];
 
-        let candidates = collect_candidates(&discovered, &user, false);
+        let candidates = collect_candidates(&discovered, &[], &user, false);
 
         assert_eq!(
             candidates,
@@ -417,6 +514,39 @@ mod tests {
     }
 
     #[test]
+    fn external_list_candidates_are_merged_after_doh_and_before_configured_ips() {
+        let discovered = vec![Ipv4Addr::new(104, 16, 0, 1)];
+        let external = vec![
+            IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
+        ];
+        let configured = vec![
+            IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(104, 18, 0, 1)),
+        ];
+
+        let candidates = collect_candidates(&discovered, &external, &configured, false);
+
+        assert_eq!(
+            candidates,
+            vec![
+                (
+                    IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)),
+                    CandidateSource::DnsDoh,
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
+                    CandidateSource::ExternalList,
+                ),
+                (
+                    IpAddr::V4(Ipv4Addr::new(104, 18, 0, 1)),
+                    CandidateSource::UserConfigured,
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn host_returns_the_bound_host() {
         let manager = make_manager(vec![], false);
         assert_eq!(manager.host(), "cache.nixos.org");
@@ -426,7 +556,7 @@ mod tests {
     fn region_derivation_appends_derived_candidates_without_duplicates() {
         let discovered = vec![Ipv4Addr::new(151, 101, 1, 91)];
 
-        let candidates = collect_candidates(&discovered, &[], true);
+        let candidates = collect_candidates(&discovered, &[], &[], true);
 
         assert_eq!(candidates[0].1, CandidateSource::DnsDoh);
         assert!(candidates.len() > 1);
@@ -456,7 +586,7 @@ mod tests {
         );
 
         // Re-discovering ip(1) must not reset its Usable state; ip(2) is new.
-        for (candidate, source) in collect_candidates(&[], &manager.user_candidates, false) {
+        for (candidate, source) in collect_candidates(&[], &[], &manager.user_candidates, false) {
             manager
                 .endpoints
                 .entry(candidate)
@@ -538,12 +668,14 @@ mod tests {
             1,
             EndpointState::Usable {
                 admission_latency: Duration::from_millis(200),
+                bandwidth: None,
             },
         );
         insert(
             2,
             EndpointState::Usable {
                 admission_latency: Duration::from_millis(50),
+                bandwidth: None,
             },
         );
 
@@ -554,7 +686,8 @@ mod tests {
         assert_eq!(
             snapshot[0].status,
             EndpointSnapshotStatus::Usable {
-                admission_latency: Duration::from_millis(50)
+                admission_latency: Duration::from_millis(50),
+                bandwidth: None,
             }
         );
         assert_eq!(snapshot[2].status, EndpointSnapshotStatus::Pending);

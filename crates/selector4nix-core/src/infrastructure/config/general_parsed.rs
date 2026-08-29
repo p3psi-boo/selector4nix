@@ -12,13 +12,17 @@ use crate::domain::substituter::model::{
     EndpointOptimizationKind, PeriodicProbingOption, Priority, endpoint_optimization_kind,
 };
 use crate::infrastructure::config::general_raw::{
-    AppRawConfiguration, CacheInfoRawConfiguration, CacheRawConfiguration,
-    CloudflareCacheProxyRawConfiguration, CloudflareOptimizationRawConfiguration,
+    AppRawConfiguration, BandwidthProbeRawConfiguration, CacheInfoRawConfiguration,
+    CacheRawConfiguration, CloudflareCacheProxyRawConfiguration,
+    CloudflareOptimizationRawConfiguration, ExternalIpListRawConfiguration,
     FastlyOptimizationRawConfiguration, NetworkRawConfiguration, ProxyRawConfiguration,
     ServerRawConfiguration, SubstituterRawConfiguration,
 };
 
 const CACHE_NIXOS_ORG_HOST: &str = "cache.nixos.org";
+const DEFAULT_BANDWIDTH_PROBE_NAR_PATH: &str =
+    "nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst";
+const DEFAULT_BANDWIDTH_PROBE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppConfiguration {
@@ -349,6 +353,7 @@ pub struct CloudflareOptimizationConfiguration {
     pub enabled: bool,
     pub candidates: Vec<IpAddr>,
     pub discovery_domains: Vec<String>,
+    pub external_ip_lists: Vec<ExternalIpListConfiguration>,
 }
 
 impl Default for CloudflareOptimizationConfiguration {
@@ -357,6 +362,7 @@ impl Default for CloudflareOptimizationConfiguration {
             enabled: false,
             candidates: Vec::new(),
             discovery_domains: default_cloudflare_discovery_domains(),
+            external_ip_lists: Vec::new(),
         }
     }
 }
@@ -375,12 +381,49 @@ impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationC
                 candidates.push(candidate);
             }
         }
+        let mut external_ip_lists = Vec::new();
+        for list in raw.external_ip_lists.unwrap_or_default() {
+            let list: ExternalIpListConfiguration = list.try_into()?;
+            if !external_ip_lists.contains(&list) {
+                external_ip_lists.push(list);
+            }
+        }
         Ok(Self {
             enabled: raw.enabled.unwrap_or(false),
             candidates,
             discovery_domains: raw
                 .discovery_domains
                 .unwrap_or_else(default_cloudflare_discovery_domains),
+            external_ip_lists,
+        })
+    }
+}
+
+/// A remotely maintained, plain-text list of endpoint IP addresses. Each
+/// non-empty line contains one IP address; a `#` starts a comment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternalIpListConfiguration {
+    pub url: Url,
+    pub refresh_interval: Duration,
+}
+
+impl TryFrom<ExternalIpListRawConfiguration> for ExternalIpListConfiguration {
+    type Error = AnyhowError;
+
+    fn try_from(raw: ExternalIpListRawConfiguration) -> Result<Self, Self::Error> {
+        let url = Url::new(&raw.url)?;
+        if url.inner().scheme() != "https" {
+            return Err(anyhow::anyhow!(
+                "`cloudflare_optimization.external_ip_lists[].url` must use HTTPS"
+            ));
+        }
+        Ok(Self {
+            url,
+            refresh_interval: raw
+                .refresh_secs
+                .map_or(Duration::from_secs(60 * 60), |seconds| {
+                    Duration::from_secs(seconds.get())
+                }),
         })
     }
 }
@@ -392,6 +435,7 @@ impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationC
 pub struct CloudflareCacheProxyConfiguration {
     pub enabled: bool,
     pub url: Option<Url>,
+    pub bandwidth_probe: BandwidthProbeConfiguration,
 }
 
 impl CloudflareCacheProxyConfiguration {
@@ -448,6 +492,63 @@ impl TryFrom<CloudflareCacheProxyRawConfiguration> for CloudflareCacheProxyConfi
         Ok(Self {
             enabled: raw.enabled.unwrap_or(false),
             url,
+            bandwidth_probe: raw.bandwidth_probe.unwrap_or_default().try_into()?,
+        })
+    }
+}
+
+/// Active Range-download benchmark configuration for the Cloudflare cache
+/// proxy. The default NAR is immutable in cache.nixos.org and substantially
+/// larger than the default 10 MiB sample.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BandwidthProbeConfiguration {
+    pub enabled: bool,
+    pub nar_path: String,
+    pub bytes: NonZeroUsize,
+    pub refresh_interval: Duration,
+    pub max_concurrent_probes: NonZeroUsize,
+}
+
+impl Default for BandwidthProbeConfiguration {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            nar_path: DEFAULT_BANDWIDTH_PROBE_NAR_PATH.to_string(),
+            bytes: NonZeroUsize::new(DEFAULT_BANDWIDTH_PROBE_BYTES).expect("10 MiB is non-zero"),
+            refresh_interval: Duration::from_secs(6 * 60 * 60),
+            max_concurrent_probes: NonZeroUsize::new(2).expect("2 is non-zero"),
+        }
+    }
+}
+
+impl TryFrom<BandwidthProbeRawConfiguration> for BandwidthProbeConfiguration {
+    type Error = AnyhowError;
+
+    fn try_from(raw: BandwidthProbeRawConfiguration) -> Result<Self, Self::Error> {
+        let default = Self::default();
+        let nar_path = raw.nar_path.unwrap_or(default.nar_path);
+        if !nar_path.starts_with("nar/")
+            || nar_path.contains("..")
+            || nar_path.contains('?')
+            || nar_path.contains('#')
+        {
+            return Err(anyhow::anyhow!(
+                "`cloudflare_cache_proxy.bandwidth_probe.nar_path` must be a relative `nar/` path without query, fragment, or `..`"
+            ));
+        }
+
+        Ok(Self {
+            enabled: raw.enabled.unwrap_or(default.enabled),
+            nar_path,
+            bytes: raw.bytes.unwrap_or(default.bytes),
+            refresh_interval: raw
+                .refresh_secs
+                .map_or(default.refresh_interval, |seconds| {
+                    Duration::from_secs(seconds.get())
+                }),
+            max_concurrent_probes: raw
+                .max_concurrent_probes
+                .unwrap_or(default.max_concurrent_probes),
         })
     }
 }
