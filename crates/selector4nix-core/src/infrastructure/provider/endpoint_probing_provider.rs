@@ -77,18 +77,19 @@ impl EndpointProbingProvider {
         Ok(latency)
     }
 
-    /// Download a bounded byte range of a configured, known-large NAR file
-    /// through one endpoint. This is a performance measurement only: a failed
-    /// benchmark never makes an otherwise admitted endpoint unavailable.
+    /// Download a bounded sample from the platform's benchmark URL through one
+    /// endpoint. The URL host is sent as HTTP Host and TLS SNI while the TCP
+    /// connection is pinned to `ip`, so the same operation benchmarks both
+    /// direct CDN endpoints and SNI proxies without weakening TLS validation.
     pub async fn benchmark_endpoint(
         &self,
-        base_url: &Url,
         ip: IpAddr,
         config: &BandwidthProbeConfiguration,
     ) -> Result<BandwidthMeasurement, ProbeEndpointError> {
-        let url = base_url.as_dir().join(&config.nar_path).unwrap();
+        let url = &config.url;
         let end = config.bytes.get() - 1;
-        let client = &self.pool.get_or_build(ip).http;
+        let port = url.inner().port_or_known_default().unwrap_or(443);
+        let client = &self.pool.get_or_build_for_host(ip, url.host(), port).http;
         let started = Instant::now();
 
         let response = client
@@ -100,42 +101,33 @@ impl EndpointProbingProvider {
             .await
             .map_err(|error| classify_error(ip, &error))?;
 
-        if response.status() != StatusCode::PARTIAL_CONTENT {
+        if response.status() != StatusCode::PARTIAL_CONTENT && !response.status().is_success() {
             return Err(ProbeEndpointError::Transient {
                 ip,
                 message: format!(
-                    "bandwidth benchmark expected HTTP 206 from {url}, got {}",
+                    "bandwidth benchmark expected a successful response from {url}, got {}",
                     response.status()
                 ),
             });
         }
 
         let mut body = response.bytes_stream();
-        let Some(first) = body.next().await else {
-            return Err(ProbeEndpointError::Transient {
-                ip,
-                message: format!("bandwidth benchmark received an empty body from {url}"),
-            });
-        };
-        let first = first.map_err(|error| ProbeEndpointError::Transient {
-            ip,
-            message: format!("failed to read benchmark body from {url}: {error}"),
-        })?;
-        let time_to_first_byte = started.elapsed();
-        let mut downloaded = first.len();
-
-        while let Some(chunk) = body.next().await {
+        let mut time_to_first_byte = None;
+        let mut downloaded = 0usize;
+        while downloaded < config.bytes.get()
+            && let Some(chunk) = body.next().await
+        {
             let chunk = chunk.map_err(|error| ProbeEndpointError::Transient {
                 ip,
                 message: format!("failed to read benchmark body from {url}: {error}"),
             })?;
-            downloaded = downloaded.saturating_add(chunk.len());
-            if downloaded > config.bytes.get() {
-                return Err(ProbeEndpointError::Transient {
-                    ip,
-                    message: format!("bandwidth benchmark received more than requested from {url}"),
-                });
+            if chunk.is_empty() {
+                continue;
             }
+            time_to_first_byte.get_or_insert_with(|| started.elapsed());
+            downloaded = downloaded
+                .saturating_add(chunk.len())
+                .min(config.bytes.get());
         }
 
         if downloaded != config.bytes.get() {
@@ -148,6 +140,7 @@ impl EndpointProbingProvider {
             });
         }
 
+        let time_to_first_byte = time_to_first_byte.expect("a complete sample is non-empty");
         let total_elapsed = started.elapsed();
         let transfer_elapsed = total_elapsed
             .checked_sub(time_to_first_byte)
@@ -249,18 +242,66 @@ mod tests {
         let provider = EndpointProbingProvider::new(Arc::clone(&pool), Duration::from_secs(5));
         let config = BandwidthProbeConfiguration {
             enabled: true,
-            nar_path: "nar/probe.nar.zst".to_string(),
+            url: Url::new(&format!("http://cache.nixos.org:{port}/nar/probe.nar.zst")).unwrap(),
             bytes: NonZeroUsize::new(16).unwrap(),
             refresh_interval: Duration::from_secs(60),
             max_concurrent_probes: NonZeroUsize::new(1).unwrap(),
         };
 
         let measurement = provider
-            .benchmark_endpoint(
-                &Url::new(&format!("http://cache.nixos.org:{port}")).unwrap(),
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                &config,
-            )
+            .benchmark_endpoint(IpAddr::V4(Ipv4Addr::LOCALHOST), &config)
+            .await
+            .unwrap();
+
+        assert!(measurement.bytes_per_second > 0);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bandwidth_probe_accepts_exact_success_body_for_speed_endpoints() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+                      content-length: 16\r\n\
+                      connection: close\r\n\
+                      \r\n\
+                      0123456789abcdef",
+                )
+                .unwrap();
+        });
+
+        let pool = Arc::new(EndpointClientPool::new(
+            "speed.cloudflare.com".to_string(),
+            port,
+            Arc::new(Client::builder),
+            Arc::new(PerHostHttpThrottler::new(ThrottlingOptions::new(
+                NonZeroUsize::new(1).unwrap(),
+            ))),
+            false,
+            NonZeroUsize::new(1024).unwrap(),
+            NonZeroUsize::new(1).unwrap(),
+            1,
+        ));
+        let provider = EndpointProbingProvider::new(pool, Duration::from_secs(5));
+        let config = BandwidthProbeConfiguration {
+            enabled: true,
+            url: Url::new(&format!(
+                "http://speed.cloudflare.com:{port}/__down?bytes=16"
+            ))
+            .unwrap(),
+            bytes: NonZeroUsize::new(16).unwrap(),
+            refresh_interval: Duration::from_secs(60),
+            max_concurrent_probes: NonZeroUsize::new(1).unwrap(),
+        };
+
+        let measurement = provider
+            .benchmark_endpoint(IpAddr::V4(Ipv4Addr::LOCALHOST), &config)
             .await
             .unwrap();
 

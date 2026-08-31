@@ -36,9 +36,9 @@ use selector4nix_core::domain::nar_info::{
 };
 use selector4nix_core::domain::substituter::model::{
     Availability, EndpointOptimizationKind, Substituter, SubstituterMeta,
-    endpoint_optimization_kind,
 };
 use selector4nix_core::domain::substituter::{SubstituterRepository, SubstituterService};
+use selector4nix_core::infrastructure::cdn::CdnDetector;
 use selector4nix_core::infrastructure::config::{AppConfiguration, AppCredential};
 use selector4nix_core::infrastructure::dns::doh_resolver::DohResolver;
 use selector4nix_core::infrastructure::endpoint::manager::EndpointManager;
@@ -55,7 +55,6 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 use crate::cli::LogLevel;
 
-const FASTLY_OPTIMIZATION_HOST: &str = "cache.nixos.org";
 const ENDPOINT_CLIENT_POOL_CAPACITY: usize = 16;
 const ENDPOINT_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const ENDPOINT_REFRESH_MAX_JITTER: Duration = Duration::from_secs(300);
@@ -174,10 +173,9 @@ pub async fn init_context(
         }
     };
 
-    // Endpoint optimization assembles one `EndpointManager` per optimized
-    // host (Fastly: cache.nixos.org; Cloudflare: Cachix substituters and the
-    // optional cache.nixos.org reverse-proxy host) and registers them all in
-    // one registry.
+    // Endpoint optimization auto-detects the CDN platform of every unique
+    // substituter host, then assembles one `EndpointManager` per recognized
+    // host with that platform's strictly separate candidate and SNI lists.
     let (streaming_http_client, endpoint_managers) = if config.fastly_optimization.enabled
         || config.cloudflare_optimization.enabled
     {
@@ -197,23 +195,82 @@ pub async fn init_context(
         let factory: Arc<dyn Fn() -> ClientBuilder + Send + Sync> =
             Arc::new(move || http_client_builder_factory(&factory_config));
         let doh = Arc::new(DohResolver::new());
-        let external_ip_lists = Arc::new(ExternalIpListProvider::new());
+        let detector = Arc::new(CdnDetector::new(Arc::clone(&doh), http_client.clone()));
+        let sni_proxy_sources = Arc::new(SniProxySourceProvider::new());
         let mut managers: Vec<Arc<EndpointManager>> = Vec::new();
 
-        if config.fastly_optimization.enabled {
-            let sub_config = config
-                .substituters
-                .iter()
-                .find(|sub_config| sub_config.url.host() == FASTLY_OPTIMIZATION_HOST)
-                .expect(
-                    "config validation guarantees a `cache.nixos.org` substituter \
-                     when fastly optimization is enabled",
-                );
+        let mut seen_hosts = std::collections::HashSet::new();
+        let mut detection_tasks = tokio::task::JoinSet::new();
+        for sub_config in &config.substituters {
+            let host = sub_config.url.host().to_string();
+            if !seen_hosts.insert(host.clone()) {
+                continue;
+            }
             let base_url = sub_config.url.clone();
-            let port = base_url.inner().port_or_known_default().unwrap_or(443);
+            let detector = Arc::clone(&detector);
+            detection_tasks.spawn(async move {
+                let detection = detector.detect(&base_url).await;
+                (host, base_url, detection)
+            });
+        }
 
+        while let Some(result) = detection_tasks.join_next().await {
+            let (host, base_url, detection) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(%error, "CDN detection task failed");
+                    continue;
+                }
+            };
+            let Some(detection) = detection else {
+                tracing::info!(
+                    %host,
+                    "CDN platform not detected; substituter will use the system-DNS path"
+                );
+                continue;
+            };
+
+            tracing::info!(
+                %host,
+                platform = ?detection.kind,
+                evidence = %detection.evidence,
+                "detected substituter CDN platform"
+            );
+
+            let (
+                user_candidates,
+                derive_regions,
+                discovery_domains,
+                platform_sni_proxy_sources,
+                bandwidth_probe,
+            ) = match detection.kind {
+                EndpointOptimizationKind::Fastly if config.fastly_optimization.enabled => (
+                    config.fastly_optimization.candidates.clone(),
+                    config.fastly_optimization.derive_regions,
+                    Vec::new(),
+                    config.fastly_optimization.sni_proxy_sources.clone(),
+                    config.fastly_optimization.bandwidth_probe.clone(),
+                ),
+                EndpointOptimizationKind::Cloudflare if config.cloudflare_optimization.enabled => (
+                    config.cloudflare_optimization.candidates.clone(),
+                    false,
+                    config.cloudflare_optimization.discovery_domains.clone(),
+                    config.cloudflare_optimization.sni_proxy_sources.clone(),
+                    config.cloudflare_optimization.bandwidth_probe.clone(),
+                ),
+                kind => {
+                    tracing::info!(
+                        %host,
+                        platform = ?kind,
+                        "detected CDN platform is disabled; substituter will use the system-DNS path"
+                    );
+                    continue;
+                }
+            };
+
+            let port = base_url.inner().port_or_known_default().unwrap_or(443);
             let pool = Arc::new(EndpointClientPool::new(
-                FASTLY_OPTIMIZATION_HOST.to_string(),
+                host.clone(),
                 port,
                 Arc::clone(&factory),
                 Arc::clone(&throttler),
@@ -226,95 +283,35 @@ pub async fn init_context(
                 Arc::clone(&pool),
                 config.network.nar_info_timeout,
             ));
+            let user_candidate_count = user_candidates.len();
+            let discovery_domain_count = discovery_domains.len();
+            let sni_proxy_source_count = platform_sni_proxy_sources.len();
+            let active_bandwidth_probe = bandwidth_probe.enabled;
             let manager = Arc::new(EndpointManager::new(
-                FASTLY_OPTIMIZATION_HOST.to_string(),
+                host.clone(),
                 base_url,
                 pool,
                 probing,
                 Arc::clone(&doh),
-                config.fastly_optimization.candidates.clone(),
-                config.fastly_optimization.derive_regions,
-                // Discovery domains are a cloudflare-only mechanism.
-                Vec::new(),
-                // External IP lists and active bandwidth probes are
-                // Cloudflare-cache-proxy-only mechanisms.
-                Vec::new(),
-                Arc::clone(&external_ip_lists),
-                None,
+                user_candidates,
+                derive_regions,
+                discovery_domains,
+                platform_sni_proxy_sources,
+                Arc::clone(&sni_proxy_sources),
+                Some(bandwidth_probe),
             ));
 
             tracing::info!(
-                user_candidates = config.fastly_optimization.candidates.len(),
-                derive_regions = config.fastly_optimization.derive_regions,
-                "fastly optimization enabled for cache.nixos.org"
+                %host,
+                platform = ?detection.kind,
+                user_candidates = user_candidate_count,
+                derive_regions,
+                discovery_domains = discovery_domain_count,
+                sni_proxy_sources = sni_proxy_source_count,
+                active_bandwidth_probe,
+                "endpoint optimization enabled for auto-detected substituter"
             );
-
             managers.push(manager);
-        }
-
-        if config.cloudflare_optimization.enabled {
-            let cloudflare_cache_proxy_host = config.cloudflare_cache_proxy.enabled.then(|| {
-                config
-                    .cloudflare_cache_proxy
-                    .url
-                    .as_ref()
-                    .expect("enabled Cloudflare cache proxy has a validated URL")
-                    .host()
-            });
-            let mut seen_hosts = std::collections::HashSet::new();
-            for sub_config in &config.substituters {
-                let host = sub_config.url.host();
-                let is_cloudflare_cache_proxy = cloudflare_cache_proxy_host == Some(host);
-                if (endpoint_optimization_kind(host) != Some(EndpointOptimizationKind::Cloudflare)
-                    && !is_cloudflare_cache_proxy)
-                    || !seen_hosts.insert(host.to_string())
-                {
-                    continue;
-                }
-                let base_url = sub_config.url.clone();
-                let port = base_url.inner().port_or_known_default().unwrap_or(443);
-
-                let pool = Arc::new(EndpointClientPool::new(
-                    host.to_string(),
-                    port,
-                    Arc::clone(&factory),
-                    Arc::clone(&throttler),
-                    config.network.chunked_streaming,
-                    config.network.streaming_chunk_max_len,
-                    config.network.streaming_window_max_len,
-                    ENDPOINT_CLIENT_POOL_CAPACITY,
-                ));
-                let probing = Arc::new(EndpointProbingProvider::new(
-                    Arc::clone(&pool),
-                    config.network.nar_info_timeout,
-                ));
-                let manager = Arc::new(EndpointManager::new(
-                    host.to_string(),
-                    base_url,
-                    pool,
-                    probing,
-                    Arc::clone(&doh),
-                    config.cloudflare_optimization.candidates.clone(),
-                    false,
-                    config.cloudflare_optimization.discovery_domains.clone(),
-                    config.cloudflare_optimization.external_ip_lists.clone(),
-                    Arc::clone(&external_ip_lists),
-                    is_cloudflare_cache_proxy
-                        .then(|| config.cloudflare_cache_proxy.bandwidth_probe.clone()),
-                ));
-
-                tracing::info!(
-                    host,
-                    user_candidates = config.cloudflare_optimization.candidates.len(),
-                    discovery_domains = config.cloudflare_optimization.discovery_domains.len(),
-                    external_ip_lists = config.cloudflare_optimization.external_ip_lists.len(),
-                    active_bandwidth_probe = is_cloudflare_cache_proxy
-                        && config.cloudflare_cache_proxy.bandwidth_probe.enabled,
-                    "cloudflare optimization enabled for substituter"
-                );
-
-                managers.push(manager);
-            }
         }
 
         let endpoint_managers = EndpointManagerRegistry::new(managers);
@@ -379,6 +376,7 @@ pub async fn init_context(
     let nar_directory_provider = Arc::new(ReqwestNarDirectoryProvider::new(
         http_client.clone(),
         credentials.clone(),
+        endpoint_managers.clone(),
     ));
 
     let nar_stream_provider = Arc::new(ReqwestNarStreamProvider::new(

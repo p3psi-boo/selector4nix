@@ -8,20 +8,16 @@ use anyhow::{Context, Error as AnyhowError, Result as AnyhowResult};
 use crate::domain::common::url::Url;
 use crate::domain::nar_info::ResolutionPolicyOption;
 use crate::domain::nar_info::model::NarUrlRewriteOption;
-use crate::domain::substituter::model::{
-    EndpointOptimizationKind, PeriodicProbingOption, Priority, endpoint_optimization_kind,
-};
+use crate::domain::substituter::model::{PeriodicProbingOption, Priority};
 use crate::infrastructure::config::general_raw::{
     AppRawConfiguration, BandwidthProbeRawConfiguration, CacheInfoRawConfiguration,
-    CacheRawConfiguration, CloudflareCacheProxyRawConfiguration,
-    CloudflareOptimizationRawConfiguration, ExternalIpListRawConfiguration,
+    CacheRawConfiguration, CloudflareOptimizationRawConfiguration,
     FastlyOptimizationRawConfiguration, NetworkRawConfiguration, ProxyRawConfiguration,
-    ServerRawConfiguration, SubstituterRawConfiguration,
+    ServerRawConfiguration, SniProxySourceRawConfiguration, SubstituterRawConfiguration,
 };
 
-const CACHE_NIXOS_ORG_HOST: &str = "cache.nixos.org";
-const DEFAULT_BANDWIDTH_PROBE_NAR_PATH: &str =
-    "nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst";
+const DEFAULT_FASTLY_BANDWIDTH_PROBE_URL: &str =
+    "https://cache.nixos.org/nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst";
 const DEFAULT_BANDWIDTH_PROBE_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -34,7 +30,6 @@ pub struct AppConfiguration {
     pub substituters: Vec<SubstituterConfiguration>,
     pub fastly_optimization: FastlyOptimizationConfiguration,
     pub cloudflare_optimization: CloudflareOptimizationConfiguration,
-    pub cloudflare_cache_proxy: CloudflareCacheProxyConfiguration,
 }
 
 impl AppConfiguration {
@@ -84,7 +79,6 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
             substituters: raw_substituters,
             fastly_optimization: raw_fastly_optimization,
             cloudflare_optimization: raw_cloudflare_optimization,
-            cloudflare_cache_proxy: raw_cloudflare_cache_proxy,
         } = raw;
 
         if raw_substituters.is_empty() {
@@ -92,61 +86,15 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
                 "at least one substituter must be configured"
             ));
         }
-        let mut substituters = raw_substituters
+        let substituters = raw_substituters
             .into_iter()
             .map(|c| c.try_into())
             .collect::<Result<Vec<SubstituterConfiguration>, _>>()?;
         let fastly_optimization: FastlyOptimizationConfiguration =
             raw_fastly_optimization.unwrap_or_default().try_into()?;
-        let cloudflare_cache_proxy: CloudflareCacheProxyConfiguration =
-            raw_cloudflare_cache_proxy.unwrap_or_default().try_into()?;
-
-        if fastly_optimization.enabled && cloudflare_cache_proxy.enabled {
-            return Err(anyhow::anyhow!(
-                "`fastly_optimization` and `cloudflare_cache_proxy` cannot both be enabled"
-            ));
-        }
-
-        if fastly_optimization.enabled
-            && !substituters
-                .iter()
-                .any(|s| s.url.host() == CACHE_NIXOS_ORG_HOST)
-        {
-            return Err(anyhow::anyhow!(
-                "`fastly_optimization` requires a substituter with host `cache.nixos.org`"
-            ));
-        }
-
-        if cloudflare_cache_proxy.enabled {
-            if !substituters
-                .iter()
-                .any(|s| s.url.host() == CACHE_NIXOS_ORG_HOST)
-            {
-                return Err(anyhow::anyhow!(
-                    "`cloudflare_cache_proxy` requires a substituter with host `cache.nixos.org`"
-                ));
-            }
-
-            for substituter in &mut substituters {
-                if substituter.url.host() == CACHE_NIXOS_ORG_HOST {
-                    substituter.url = cloudflare_cache_proxy.route(&substituter.url)?;
-                }
-            }
-        }
 
         let cloudflare_optimization: CloudflareOptimizationConfiguration =
             raw_cloudflare_optimization.unwrap_or_default().try_into()?;
-        if cloudflare_optimization.enabled
-            && !cloudflare_cache_proxy.enabled
-            && !substituters.iter().any(|s| {
-                endpoint_optimization_kind(s.url.host())
-                    == Some(EndpointOptimizationKind::Cloudflare)
-            })
-        {
-            return Err(anyhow::anyhow!(
-                "`cloudflare_optimization` requires a substituter with a `cachix.org` host or an enabled `cloudflare_cache_proxy`"
-            ));
-        }
         Ok(Self {
             server: server.try_into()?,
             network: network.unwrap_or_default().try_into()?,
@@ -156,7 +104,6 @@ impl TryFrom<AppRawConfiguration> for AppConfiguration {
             substituters,
             fastly_optimization,
             cloudflare_optimization,
-            cloudflare_cache_proxy,
         })
     }
 }
@@ -323,27 +270,52 @@ impl TryFrom<CacheRawConfiguration> for CacheConfiguration {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FastlyOptimizationConfiguration {
     pub enabled: bool,
     pub candidates: Vec<IpAddr>,
     pub derive_regions: bool,
+    pub sni_proxy_sources: Vec<SniProxySourceConfiguration>,
+    pub bandwidth_probe: BandwidthProbeConfiguration,
+}
+
+impl Default for FastlyOptimizationConfiguration {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidates: Vec::new(),
+            derive_regions: false,
+            sni_proxy_sources: Vec::new(),
+            bandwidth_probe: BandwidthProbeConfiguration::fastly_default(),
+        }
+    }
 }
 
 impl TryFrom<FastlyOptimizationRawConfiguration> for FastlyOptimizationConfiguration {
     type Error = AnyhowError;
 
     fn try_from(raw: FastlyOptimizationRawConfiguration) -> Result<Self, Self::Error> {
+        let FastlyOptimizationRawConfiguration {
+            enabled,
+            candidates: raw_candidates,
+            derive_regions,
+            sni_proxy_sources,
+            bandwidth_probe,
+        } = raw;
         let mut candidates = Vec::new();
-        for candidate in raw.candidates.unwrap_or_default() {
+        for candidate in raw_candidates.unwrap_or_default() {
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);
             }
         }
         Ok(Self {
-            enabled: raw.enabled.unwrap_or(false),
+            enabled: enabled.unwrap_or(false),
             candidates,
-            derive_regions: raw.derive_regions.unwrap_or(false),
+            derive_regions: derive_regions.unwrap_or(false),
+            sni_proxy_sources: parse_sni_proxy_sources(sni_proxy_sources)?,
+            bandwidth_probe: BandwidthProbeConfiguration::for_fastly(
+                bandwidth_probe.unwrap_or_default(),
+            )?,
         })
     }
 }
@@ -353,7 +325,8 @@ pub struct CloudflareOptimizationConfiguration {
     pub enabled: bool,
     pub candidates: Vec<IpAddr>,
     pub discovery_domains: Vec<String>,
-    pub external_ip_lists: Vec<ExternalIpListConfiguration>,
+    pub sni_proxy_sources: Vec<SniProxySourceConfiguration>,
+    pub bandwidth_probe: BandwidthProbeConfiguration,
 }
 
 impl Default for CloudflareOptimizationConfiguration {
@@ -362,7 +335,8 @@ impl Default for CloudflareOptimizationConfiguration {
             enabled: false,
             candidates: Vec::new(),
             discovery_domains: default_cloudflare_discovery_domains(),
-            external_ip_lists: Vec::new(),
+            sni_proxy_sources: Vec::new(),
+            bandwidth_probe: BandwidthProbeConfiguration::cloudflare_default(),
         }
     }
 }
@@ -375,47 +349,60 @@ impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationC
     type Error = AnyhowError;
 
     fn try_from(raw: CloudflareOptimizationRawConfiguration) -> Result<Self, Self::Error> {
+        let CloudflareOptimizationRawConfiguration {
+            enabled,
+            candidates: raw_candidates,
+            discovery_domains,
+            sni_proxy_sources,
+            bandwidth_probe,
+        } = raw;
         let mut candidates = Vec::new();
-        for candidate in raw.candidates.unwrap_or_default() {
+        for candidate in raw_candidates.unwrap_or_default() {
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);
             }
         }
-        let mut external_ip_lists = Vec::new();
-        for list in raw.external_ip_lists.unwrap_or_default() {
-            let list: ExternalIpListConfiguration = list.try_into()?;
-            if !external_ip_lists.contains(&list) {
-                external_ip_lists.push(list);
-            }
-        }
         Ok(Self {
-            enabled: raw.enabled.unwrap_or(false),
+            enabled: enabled.unwrap_or(false),
             candidates,
-            discovery_domains: raw
-                .discovery_domains
+            discovery_domains: discovery_domains
                 .unwrap_or_else(default_cloudflare_discovery_domains),
-            external_ip_lists,
+            sni_proxy_sources: parse_sni_proxy_sources(sni_proxy_sources)?,
+            bandwidth_probe: BandwidthProbeConfiguration::for_cloudflare(
+                bandwidth_probe.unwrap_or_default(),
+            )?,
         })
     }
 }
 
-/// A remotely maintained, plain-text list of endpoint IP addresses. Each
-/// non-empty line contains one IP address; a `#` starts a comment.
+/// A `file://`, `http://`, or `https://` plain-text list of SNI proxy IPs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExternalIpListConfiguration {
-    pub url: Url,
+pub struct SniProxySourceConfiguration {
+    pub url: url::Url,
     pub refresh_interval: Duration,
 }
 
-impl TryFrom<ExternalIpListRawConfiguration> for ExternalIpListConfiguration {
+impl TryFrom<SniProxySourceRawConfiguration> for SniProxySourceConfiguration {
     type Error = AnyhowError;
 
-    fn try_from(raw: ExternalIpListRawConfiguration) -> Result<Self, Self::Error> {
-        let url = Url::new(&raw.url)?;
-        if url.inner().scheme() != "https" {
-            return Err(anyhow::anyhow!(
-                "`cloudflare_optimization.external_ip_lists[].url` must use HTTPS"
-            ));
+    fn try_from(raw: SniProxySourceRawConfiguration) -> Result<Self, Self::Error> {
+        let url = url::Url::parse(&raw.url)
+            .with_context(|| format!("invalid SNI proxy source URL `{}`", raw.url))?;
+        match url.scheme() {
+            "file" => {
+                if url.query().is_some() || url.fragment().is_some() || url.to_file_path().is_err()
+                {
+                    return Err(anyhow::anyhow!(
+                        "SNI proxy `file://` source must be an absolute file URL without query or fragment"
+                    ));
+                }
+            }
+            "http" | "https" if url.host_str().is_some() => {}
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "SNI proxy source URL must use `file`, `http`, or `https`"
+                ));
+            }
         }
         Ok(Self {
             url,
@@ -428,129 +415,92 @@ impl TryFrom<ExternalIpListRawConfiguration> for ExternalIpListConfiguration {
     }
 }
 
-/// Routes requests for the official Nix cache through a Cloudflare-hosted
-/// reverse proxy. The configured URL is the proxy origin; requests are mapped
-/// to `/{scheme}/{host}/{path}` below that origin.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct CloudflareCacheProxyConfiguration {
-    pub enabled: bool,
-    pub url: Option<Url>,
-    pub bandwidth_probe: BandwidthProbeConfiguration,
-}
-
-impl CloudflareCacheProxyConfiguration {
-    fn route(&self, upstream: &Url) -> AnyhowResult<Url> {
-        let proxy_url = self
-            .url
-            .as_ref()
-            .expect("enabled cloudflare cache proxy has a validated URL");
-        let port = upstream
-            .inner()
-            .port()
-            .map(|port| format!(":{port}"))
-            .unwrap_or_default();
-        let path = upstream.inner().path().trim_start_matches('/');
-        let route = format!(
-            "{}/{host}{port}/{path}",
-            upstream.inner().scheme(),
-            host = upstream.host(),
-        );
-
-        proxy_url
-            .as_dir()
-            .join(&route)
-            .map_err(AnyhowError::from)
-            .context("could not construct Cloudflare cache-proxy URL")
-    }
-}
-
-impl TryFrom<CloudflareCacheProxyRawConfiguration> for CloudflareCacheProxyConfiguration {
-    type Error = AnyhowError;
-
-    fn try_from(raw: CloudflareCacheProxyRawConfiguration) -> Result<Self, Self::Error> {
-        let url = raw.url.map(|value| Url::new(&value)).transpose()?;
-
-        if raw.enabled.unwrap_or(false) && url.is_none() {
-            return Err(anyhow::anyhow!(
-                "`cloudflare_cache_proxy.url` is required when `cloudflare_cache_proxy.enabled` is true"
-            ));
+fn parse_sni_proxy_sources(
+    raw_sources: Option<Vec<SniProxySourceRawConfiguration>>,
+) -> AnyhowResult<Vec<SniProxySourceConfiguration>> {
+    let mut sources = Vec::new();
+    for source in raw_sources.unwrap_or_default() {
+        let source = source.try_into()?;
+        if !sources.contains(&source) {
+            sources.push(source);
         }
-
-        if let Some(url) = &url {
-            if url.inner().scheme() != "https" {
-                return Err(anyhow::anyhow!(
-                    "`cloudflare_cache_proxy.url` must use HTTPS"
-                ));
-            }
-            if url.inner().query().is_some() || url.inner().fragment().is_some() {
-                return Err(anyhow::anyhow!(
-                    "`cloudflare_cache_proxy.url` must not contain a query string or fragment"
-                ));
-            }
-        }
-
-        Ok(Self {
-            enabled: raw.enabled.unwrap_or(false),
-            url,
-            bandwidth_probe: raw.bandwidth_probe.unwrap_or_default().try_into()?,
-        })
     }
+    Ok(sources)
 }
 
-/// Active Range-download benchmark configuration for the Cloudflare cache
-/// proxy. The default NAR is immutable in cache.nixos.org and substantially
-/// larger than the default 10 MiB sample.
+/// Active bounded-download benchmark configuration shared by Fastly and
+/// Cloudflare endpoint managers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BandwidthProbeConfiguration {
     pub enabled: bool,
-    pub nar_path: String,
+    pub url: Url,
     pub bytes: NonZeroUsize,
     pub refresh_interval: Duration,
     pub max_concurrent_probes: NonZeroUsize,
 }
 
-impl Default for BandwidthProbeConfiguration {
-    fn default() -> Self {
+impl BandwidthProbeConfiguration {
+    fn fastly_default() -> Self {
+        Self::with_default_url(DEFAULT_FASTLY_BANDWIDTH_PROBE_URL)
+    }
+
+    fn cloudflare_default() -> Self {
+        Self::with_default_url(&default_cloudflare_bandwidth_probe_url(
+            DEFAULT_BANDWIDTH_PROBE_BYTES,
+        ))
+    }
+
+    fn with_default_url(url: &str) -> Self {
         Self {
             enabled: true,
-            nar_path: DEFAULT_BANDWIDTH_PROBE_NAR_PATH.to_string(),
+            url: Url::new(url).expect("default bandwidth probe URL is valid"),
             bytes: NonZeroUsize::new(DEFAULT_BANDWIDTH_PROBE_BYTES).expect("10 MiB is non-zero"),
             refresh_interval: Duration::from_secs(6 * 60 * 60),
             max_concurrent_probes: NonZeroUsize::new(2).expect("2 is non-zero"),
         }
     }
-}
 
-impl TryFrom<BandwidthProbeRawConfiguration> for BandwidthProbeConfiguration {
-    type Error = AnyhowError;
+    fn for_fastly(raw: BandwidthProbeRawConfiguration) -> AnyhowResult<Self> {
+        Self::from_raw(raw, |_: usize| {
+            DEFAULT_FASTLY_BANDWIDTH_PROBE_URL.to_string()
+        })
+    }
 
-    fn try_from(raw: BandwidthProbeRawConfiguration) -> Result<Self, Self::Error> {
-        let default = Self::default();
-        let nar_path = raw.nar_path.unwrap_or(default.nar_path);
-        if !nar_path.starts_with("nar/")
-            || nar_path.contains("..")
-            || nar_path.contains('?')
-            || nar_path.contains('#')
-        {
+    fn for_cloudflare(raw: BandwidthProbeRawConfiguration) -> AnyhowResult<Self> {
+        Self::from_raw(raw, default_cloudflare_bandwidth_probe_url)
+    }
+
+    fn from_raw(
+        raw: BandwidthProbeRawConfiguration,
+        default_url: impl FnOnce(usize) -> String,
+    ) -> AnyhowResult<Self> {
+        let bytes = raw
+            .bytes
+            .unwrap_or(NonZeroUsize::new(DEFAULT_BANDWIDTH_PROBE_BYTES).unwrap());
+        let url = Url::new(&raw.url.unwrap_or_else(|| default_url(bytes.get())))?;
+        if url.inner().scheme() != "https" {
             return Err(anyhow::anyhow!(
-                "`cloudflare_cache_proxy.bandwidth_probe.nar_path` must be a relative `nar/` path without query, fragment, or `..`"
+                "bandwidth probe URL must use HTTPS so SNI and certificate validation are tested"
             ));
         }
-
         Ok(Self {
-            enabled: raw.enabled.unwrap_or(default.enabled),
-            nar_path,
-            bytes: raw.bytes.unwrap_or(default.bytes),
+            enabled: raw.enabled.unwrap_or(true),
+            url,
+            bytes,
             refresh_interval: raw
                 .refresh_secs
-                .map_or(default.refresh_interval, |seconds| {
+                .map_or(Duration::from_secs(6 * 60 * 60), |seconds| {
                     Duration::from_secs(seconds.get())
                 }),
             max_concurrent_probes: raw
                 .max_concurrent_probes
-                .unwrap_or(default.max_concurrent_probes),
+                .unwrap_or(NonZeroUsize::new(2).unwrap()),
         })
     }
+}
+
+fn default_cloudflare_bandwidth_probe_url(bytes: usize) -> String {
+    format!("https://speed.cloudflare.com/__down?bytes={bytes}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

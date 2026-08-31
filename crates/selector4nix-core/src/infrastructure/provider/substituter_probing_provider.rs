@@ -146,7 +146,7 @@ mod tests {
     use crate::infrastructure::dns::doh_resolver::DohResolver;
     use crate::infrastructure::endpoint::manager::EndpointManager;
     use crate::infrastructure::provider::{
-        EndpointClientPool, EndpointProbingProvider, ExternalIpListProvider,
+        EndpointClientPool, EndpointProbingProvider, SniProxySourceProvider,
     };
 
     fn make_manager(user_candidates: Vec<IpAddr>, port: u16) -> EndpointManager {
@@ -176,19 +176,8 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
-            Arc::new(ExternalIpListProvider::new()),
+            Arc::new(SniProxySourceProvider::new()),
             None,
-        )
-    }
-
-    fn make_provider(port: u16, user_candidates: Vec<IpAddr>) -> ReqwestSubstituterProbingProvider {
-        let manager = make_manager(user_candidates, port);
-        let registry = EndpointManagerRegistry::new(vec![Arc::new(manager)]);
-        ReqwestSubstituterProbingProvider::new(
-            Client::new(),
-            Duration::from_millis(1500),
-            Arc::new(AppCredential::empty()),
-            registry,
         )
     }
 

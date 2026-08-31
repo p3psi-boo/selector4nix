@@ -40,6 +40,7 @@ impl GetDashboardConfigSummaryUseCase {
                 self.proxy_section(),
                 self.cache_info_section(),
                 self.fastly_optimization_section(),
+                self.cloudflare_optimization_section(),
             ],
         }
     }
@@ -51,7 +52,7 @@ impl GetDashboardConfigSummaryUseCase {
             entries: vec![
                 ConfigSummaryEntryData {
                     name: "Enabled",
-                    description: "Endpoint optimization for cache.nixos.org.",
+                    description: "Endpoint optimization for auto-detected Fastly substituters.",
                     value: cfg.enabled.to_string(),
                 },
                 ConfigSummaryEntryData {
@@ -63,6 +64,50 @@ impl GetDashboardConfigSummaryUseCase {
                     name: "Configured candidates",
                     description: "Number of explicitly configured endpoint candidate IPs.",
                     value: format!("{}", cfg.candidates.len()),
+                },
+                ConfigSummaryEntryData {
+                    name: "SNI proxy sources",
+                    description: "Number of Fastly-specific file or HTTP(S) SNI proxy lists.",
+                    value: cfg.sni_proxy_sources.len().to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "Bandwidth benchmark",
+                    description: "Actively rank admitted endpoints by bounded download performance.",
+                    value: cfg.bandwidth_probe.enabled.to_string(),
+                },
+            ],
+        }
+    }
+
+    fn cloudflare_optimization_section(&self) -> ConfigSummarySectionData {
+        let cfg = &self.config.cloudflare_optimization;
+        ConfigSummarySectionData {
+            title: "Cloudflare Optimization",
+            entries: vec![
+                ConfigSummaryEntryData {
+                    name: "Enabled",
+                    description: "Endpoint optimization for auto-detected Cloudflare substituters.",
+                    value: cfg.enabled.to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "Configured candidates",
+                    description: "Number of explicitly configured endpoint candidate IPs.",
+                    value: cfg.candidates.len().to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "Discovery domains",
+                    description: "Number of Cloudflare preferred-IP discovery domains.",
+                    value: cfg.discovery_domains.len().to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "SNI proxy sources",
+                    description: "Number of Cloudflare-specific file or HTTP(S) SNI proxy lists.",
+                    value: cfg.sni_proxy_sources.len().to_string(),
+                },
+                ConfigSummaryEntryData {
+                    name: "Bandwidth benchmark",
+                    description: "Actively rank admitted endpoints by bounded download performance.",
+                    value: cfg.bandwidth_probe.enabled.to_string(),
                 },
             ],
         }

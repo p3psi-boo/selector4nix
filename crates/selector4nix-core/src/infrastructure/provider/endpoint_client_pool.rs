@@ -27,6 +27,13 @@ struct PoolEntry {
     last_used: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PoolKey {
+    host: String,
+    port: u16,
+    ip: IpAddr,
+}
+
 /// Bounded pool of endpoint-bound clients with least-recently-used eviction.
 pub struct EndpointClientPool {
     host: String,
@@ -37,7 +44,7 @@ pub struct EndpointClientPool {
     chunk_max_len: NonZeroUsize,
     window_max_len: NonZeroUsize,
     capacity: usize,
-    entries: DashMap<IpAddr, PoolEntry>,
+    entries: DashMap<PoolKey, PoolEntry>,
 }
 
 impl EndpointClientPool {
@@ -68,7 +75,19 @@ impl EndpointClientPool {
     }
 
     pub fn get_or_build(&self, ip: IpAddr) -> EndpointClientSet {
-        if let Some(mut entry) = self.entries.get_mut(&ip) {
+        self.get_or_build_for_host(ip, &self.host, self.port)
+    }
+
+    /// Build a client that sends the URL host and TLS SNI unchanged while
+    /// connecting to `ip`. Bandwidth probes use this to test a platform-wide
+    /// URL (for example speed.cloudflare.com) through an SNI proxy IP.
+    pub fn get_or_build_for_host(&self, ip: IpAddr, host: &str, port: u16) -> EndpointClientSet {
+        let key = PoolKey {
+            host: host.to_string(),
+            port,
+            ip,
+        };
+        if let Some(mut entry) = self.entries.get_mut(&key) {
             entry.last_used = Instant::now();
             let PoolEntry { clients, .. } = &*entry;
             return EndpointClientSet {
@@ -79,9 +98,9 @@ impl EndpointClientPool {
 
         self.evict_if_full();
 
-        let clients = self.build(ip);
+        let clients = self.build(ip, host, port);
         self.entries.insert(
-            ip,
+            key,
             PoolEntry {
                 clients: EndpointClientSet {
                     http: clients.http.clone(),
@@ -93,17 +112,17 @@ impl EndpointClientPool {
         clients
     }
 
-    fn build(&self, ip: IpAddr) -> EndpointClientSet {
-        let endpoint_addrs = [SocketAddr::new(ip, self.port)];
+    fn build(&self, ip: IpAddr, host: &str, port: u16) -> EndpointClientSet {
+        let endpoint_addrs = [SocketAddr::new(ip, port)];
 
         let http = (self.factory)()
-            .resolve_to_addrs(self.host.as_str(), &endpoint_addrs)
+            .resolve_to_addrs(host, &endpoint_addrs)
             .no_proxy()
             .build()
             .expect("invalid reqwest client configuration");
 
         let streaming_builder = (self.factory)()
-            .resolve_to_addrs(self.host.as_str(), &endpoint_addrs)
+            .resolve_to_addrs(host, &endpoint_addrs)
             .no_proxy();
         let streaming = Arc::new(StreamingClient::with_shared_throttler(
             streaming_builder,
@@ -122,10 +141,10 @@ impl EndpointClientPool {
                 .entries
                 .iter()
                 .min_by_key(|entry| entry.last_used)
-                .map(|entry| *entry.key());
+                .map(|entry| entry.key().clone());
             match oldest {
-                Some(ip) => {
-                    self.entries.remove(&ip);
+                Some(key) => {
+                    self.entries.remove(&key);
                 }
                 None => break,
             }
@@ -151,6 +170,14 @@ mod tests {
             NonZeroUsize::new(4096).unwrap(),
             capacity,
         )
+    }
+
+    fn key(ip: IpAddr) -> PoolKey {
+        PoolKey {
+            host: "cache.nixos.org".to_string(),
+            port: 443,
+            ip,
+        }
     }
 
     #[test]
@@ -179,6 +206,18 @@ mod tests {
     }
 
     #[test]
+    fn platform_probe_host_gets_a_distinct_pinned_client() {
+        let pool = pool(16);
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+
+        let origin = pool.get_or_build(ip);
+        let probe = pool.get_or_build_for_host(ip, "speed.cloudflare.com", 443);
+
+        assert!(!Arc::ptr_eq(&origin.streaming, &probe.streaming));
+        assert_eq!(pool.entries.len(), 2);
+    }
+
+    #[test]
     fn evicts_least_recently_used_entry_when_full() {
         let pool = pool(3);
         let ip1: IpAddr = "151.101.1.91".parse().unwrap();
@@ -199,9 +238,9 @@ mod tests {
         pool.get_or_build(ip4);
 
         assert_eq!(pool.entries.len(), 3);
-        assert!(pool.entries.contains_key(&ip1));
-        assert!(!pool.entries.contains_key(&ip2));
-        assert!(pool.entries.contains_key(&ip3));
-        assert!(pool.entries.contains_key(&ip4));
+        assert!(pool.entries.contains_key(&key(ip1)));
+        assert!(!pool.entries.contains_key(&key(ip2)));
+        assert!(pool.entries.contains_key(&key(ip3)));
+        assert!(pool.entries.contains_key(&key(ip4)));
     }
 }

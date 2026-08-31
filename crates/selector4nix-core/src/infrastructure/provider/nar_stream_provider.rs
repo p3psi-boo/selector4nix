@@ -132,7 +132,7 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
                 let endpoint_plan =
                     endpoint_ips_for(location.substituter().url().host(), &endpoint_managers);
                 let endpoint_manager = endpoint_plan.as_ref().map(|(manager, _)| Arc::clone(manager));
-                let clients: Vec<(Option<IpAddr>, Arc<StreamingClient>)> = endpoint_plan
+                let mut clients: Vec<(Option<IpAddr>, Arc<StreamingClient>)> = endpoint_plan
                     .map(|(manager, ips)| {
                         ips.into_iter()
                             .filter_map(|ip| {
@@ -142,8 +142,11 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
                             })
                             .collect::<Vec<_>>()
                     })
-                    .filter(|clients| !clients.is_empty())
-                    .unwrap_or_else(|| vec![(None, Arc::clone(&client))]);
+                    .unwrap_or_default();
+                // System DNS is always the final route. This also makes the
+                // documented fallback effective when every admitted direct
+                // endpoint or SNI proxy fails while opening a NAR stream.
+                clients.push((None, Arc::clone(&client)));
 
                 let mut last_response = None;
                 let mut endpoint_failed = false;
@@ -280,7 +283,7 @@ mod tests {
     use super::*;
     use crate::infrastructure::dns::doh_resolver::DohResolver;
     use crate::infrastructure::provider::{
-        EndpointClientPool, EndpointProbingProvider, ExternalIpListProvider,
+        EndpointClientPool, EndpointProbingProvider, SniProxySourceProvider,
     };
 
     fn make_manager(user_candidates: Vec<IpAddr>, port: u16) -> EndpointManager {
@@ -310,7 +313,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
-            Arc::new(ExternalIpListProvider::new()),
+            Arc::new(SniProxySourceProvider::new()),
             None,
         )
     }

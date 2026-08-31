@@ -28,18 +28,40 @@ struct DohAnswer {
     data: Option<String>,
 }
 
-/// Extract the A-record addresses from a JSON DoH response body, skipping
-/// non-A entries and unparseable data values.
-fn parse_a_records(body: &str) -> Vec<Ipv4Addr> {
+/// A-record addresses and canonical-name aliases returned by a DoH lookup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DohLookup {
+    pub addresses: Vec<Ipv4Addr>,
+    pub aliases: Vec<String>,
+}
+
+/// Extract A records and CNAME aliases from a JSON DoH response body, skipping
+/// entries with missing or unparseable data values.
+fn parse_lookup(body: &str) -> DohLookup {
     let Ok(response) = serde_json::from_str::<DohResponse>(body) else {
-        return Vec::new();
+        return DohLookup::default();
     };
-    response
-        .answer
-        .into_iter()
-        .filter(|answer| answer.record_type == 1)
-        .filter_map(|answer| answer.data.and_then(|data| data.parse().ok()))
-        .collect()
+    let mut lookup = DohLookup::default();
+    for answer in response.answer {
+        let Some(data) = answer.data else {
+            continue;
+        };
+        match answer.record_type {
+            1 => {
+                if let Ok(address) = data.parse() {
+                    lookup.addresses.push(address);
+                }
+            }
+            5 => {
+                let alias = data.trim_end_matches('.').to_ascii_lowercase();
+                if !alias.is_empty() {
+                    lookup.aliases.push(alias);
+                }
+            }
+            _ => {}
+        }
+    }
+    lookup
 }
 
 /// DNS-over-HTTPS resolver backed by Cloudflare and Google, with bootstrap
@@ -78,23 +100,37 @@ impl DohResolver {
     /// deduplicated union of the results. A single resolver failing only
     /// produces a warning; the other resolver's results are still returned.
     pub async fn query_a(&self, name: &str) -> Vec<Ipv4Addr> {
+        self.query_a_with_aliases(name).await.addresses
+    }
+
+    /// Query both DoH resolvers for A records and the CNAME chain of `name`.
+    /// The aliases are used by CDN platform detection while the addresses are
+    /// also suitable for endpoint candidate discovery.
+    pub async fn query_a_with_aliases(&self, name: &str) -> DohLookup {
         let (cloudflare, google) = tokio::join!(
             self.query_one(CLOUDFLARE_DOH_URL, name),
             self.query_one(GOOGLE_DOH_URL, name),
         );
         let mut addresses = BTreeSet::new();
+        let mut aliases = BTreeSet::new();
         for (resolver, result) in [("cloudflare-dns.com", cloudflare), ("dns.google", google)] {
             match result {
-                Ok(records) => addresses.extend(records),
+                Ok(lookup) => {
+                    addresses.extend(lookup.addresses);
+                    aliases.extend(lookup.aliases);
+                }
                 Err(error) => {
                     tracing::warn!(%name, resolver, %error, "DoH query failed");
                 }
             }
         }
-        addresses.into_iter().collect()
+        DohLookup {
+            addresses: addresses.into_iter().collect(),
+            aliases: aliases.into_iter().collect(),
+        }
     }
 
-    async fn query_one(&self, url: &str, name: &str) -> reqwest::Result<Vec<Ipv4Addr>> {
+    async fn query_one(&self, url: &str, name: &str) -> reqwest::Result<DohLookup> {
         // `name` is a hostname, so it needs no percent-encoding; the `query`
         // feature of reqwest is not enabled in this workspace.
         let url = format!("{url}?name={name}&type=A");
@@ -107,7 +143,7 @@ impl DohResolver {
             .error_for_status()?
             .text()
             .await?;
-        Ok(parse_a_records(&body))
+        Ok(parse_lookup(&body))
     }
 }
 
@@ -145,10 +181,10 @@ mod tests {
     }"#;
 
     #[test]
-    fn parses_a_records_and_skips_cname() {
-        let records = parse_a_records(CACHE_NIXOS_ORG_RESPONSE);
+    fn parses_a_records_and_cname() {
+        let lookup = parse_lookup(CACHE_NIXOS_ORG_RESPONSE);
         assert_eq!(
-            records,
+            lookup.addresses,
             vec![
                 Ipv4Addr::new(151, 101, 1, 91),
                 Ipv4Addr::new(151, 101, 65, 91),
@@ -156,12 +192,16 @@ mod tests {
                 Ipv4Addr::new(151, 101, 193, 91),
             ]
         );
+        assert_eq!(lookup.aliases, vec!["dualstack.n.sni.global.fastly.net"]);
     }
 
     #[test]
     fn empty_answer_yields_no_records() {
-        assert!(parse_a_records(r#"{"Status": 3, "Answer": []}"#).is_empty());
-        assert!(parse_a_records(r#"{"Status": 3}"#).is_empty());
+        assert_eq!(
+            parse_lookup(r#"{"Status": 3, "Answer": []}"#),
+            DohLookup::default()
+        );
+        assert_eq!(parse_lookup(r#"{"Status": 3}"#), DohLookup::default());
     }
 
     #[test]
@@ -170,12 +210,15 @@ mod tests {
             {"name": "example.com.", "type": 1, "TTL": 60, "data": "not-an-ip"},
             {"name": "example.com.", "type": 1, "TTL": 60, "data": "192.0.2.1"}
         ]}"#;
-        assert_eq!(parse_a_records(body), vec![Ipv4Addr::new(192, 0, 2, 1)]);
+        assert_eq!(
+            parse_lookup(body).addresses,
+            vec![Ipv4Addr::new(192, 0, 2, 1)]
+        );
     }
 
     #[test]
     fn invalid_json_yields_no_records() {
-        assert!(parse_a_records("this is not json").is_empty());
+        assert_eq!(parse_lookup("this is not json"), DohLookup::default());
     }
 
     #[test]
@@ -183,6 +226,6 @@ mod tests {
         // The Question section carries `type: 1` without a `data` field;
         // it must not leak into the results.
         let body = r#"{"Question": [{"name": "example.com.", "type": 1}]}"#;
-        assert!(parse_a_records(body).is_empty());
+        assert!(parse_lookup(body).addresses.is_empty());
     }
 }

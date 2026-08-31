@@ -63,8 +63,6 @@ fn defaults_are_applied_when_sections_omitted() {
     assert!(config.substituters[0].nar_info_timeout.is_none());
     assert!(config.substituters[0].nar_timeout.is_none());
     assert!(config.substituters[0].max_concurrent_requests.is_none());
-    assert!(!config.cloudflare_cache_proxy.enabled);
-    assert!(config.cloudflare_cache_proxy.url.is_none());
 }
 
 #[test]
@@ -135,6 +133,8 @@ fn fastly_optimization_defaults_to_disabled() {
     assert!(!config.fastly_optimization.enabled);
     assert!(config.fastly_optimization.candidates.is_empty());
     assert!(!config.fastly_optimization.derive_regions);
+    assert!(config.fastly_optimization.sni_proxy_sources.is_empty());
+    assert!(config.fastly_optimization.bandwidth_probe.enabled);
 }
 
 #[test]
@@ -145,6 +145,13 @@ fn fastly_optimization_is_parsed_when_enabled() {
 enabled = true
 candidates = ["151.101.1.91", "151.101.65.91"]
 derive_regions = true
+sni_proxy_sources = [
+  { url = "file:///tmp/fastly-sni-proxies.txt", refresh_secs = 60 },
+]
+
+[fastly_optimization.bandwidth_probe]
+url = "https://cache.nixos.org/nar/probe.nar.zst"
+bytes = 1048576
 "#,
     ))
     .unwrap();
@@ -158,11 +165,20 @@ derive_regions = true
         ],
     );
     assert!(config.fastly_optimization.derive_regions);
+    assert_eq!(config.fastly_optimization.sni_proxy_sources.len(), 1);
+    assert_eq!(
+        config.fastly_optimization.bandwidth_probe.url.value(),
+        "https://cache.nixos.org/nar/probe.nar.zst"
+    );
+    assert_eq!(
+        config.fastly_optimization.bandwidth_probe.bytes.get(),
+        1048576
+    );
 }
 
 #[test]
-fn fastly_optimization_requires_cache_nixos_org_substituter() {
-    let result = AppConfiguration::deserialize(
+fn fastly_optimization_accepts_runtime_detected_substituter_hosts() {
+    let config = AppConfiguration::deserialize(
         r#"
 [server]
 ip = "127.0.0.1"
@@ -173,9 +189,11 @@ url = "https://mirror.example.com/"
 [fastly_optimization]
 enabled = true
 "#,
-    );
+    )
+    .unwrap();
 
-    assert!(result.is_err());
+    assert!(config.fastly_optimization.enabled);
+    assert_eq!(config.substituters[0].url.host(), "mirror.example.com");
 }
 
 #[test]
@@ -219,7 +237,12 @@ fn cloudflare_optimization_defaults_to_disabled() {
         config.cloudflare_optimization.discovery_domains,
         vec!["cloudflare.182682.xyz".to_string()],
     );
-    assert!(config.cloudflare_optimization.external_ip_lists.is_empty());
+    assert!(config.cloudflare_optimization.sni_proxy_sources.is_empty());
+    assert!(config.cloudflare_optimization.bandwidth_probe.enabled);
+    assert_eq!(
+        config.cloudflare_optimization.bandwidth_probe.url.value(),
+        "https://speed.cloudflare.com/__down?bytes=10485760"
+    );
 }
 
 #[test]
@@ -233,9 +256,14 @@ url = "https://nix-community.cachix.org/"
 enabled = true
 candidates = ["1.2.3.4"]
 discovery_domains = ["cf.example.com"]
-external_ip_lists = [
-  { url = "https://ips.example/cloudflare.txt", refresh_secs = 900 },
+sni_proxy_sources = [
+  { url = "http://ips.example/cloudflare.txt", refresh_secs = 900 },
+  { url = "file:///tmp/cloudflare-sni-proxies.txt" },
 ]
+
+[cloudflare_optimization.bandwidth_probe]
+url = "https://speed.cloudflare.com/__down?bytes=2097152"
+bytes = 2097152
 "#,
     ))
     .unwrap();
@@ -249,29 +277,41 @@ external_ip_lists = [
         config.cloudflare_optimization.discovery_domains,
         vec!["cf.example.com".to_string()],
     );
-    assert_eq!(config.cloudflare_optimization.external_ip_lists.len(), 1);
+    assert_eq!(config.cloudflare_optimization.sni_proxy_sources.len(), 2);
     assert_eq!(
-        config.cloudflare_optimization.external_ip_lists[0]
+        config.cloudflare_optimization.sni_proxy_sources[0]
             .url
-            .value(),
-        "https://ips.example/cloudflare.txt"
+            .as_str(),
+        "http://ips.example/cloudflare.txt"
     );
     assert_eq!(
-        config.cloudflare_optimization.external_ip_lists[0].refresh_interval,
+        config.cloudflare_optimization.sni_proxy_sources[0].refresh_interval,
         Duration::from_secs(900)
+    );
+    assert_eq!(
+        config.cloudflare_optimization.bandwidth_probe.bytes.get(),
+        2097152
     );
 }
 
 #[test]
-fn cloudflare_optimization_requires_cachix_substituter() {
-    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+fn cloudflare_optimization_accepts_runtime_detected_substituter_hosts() {
+    let config = AppConfiguration::deserialize(
         r#"
+[server]
+ip = "127.0.0.1"
+
+[[substituters]]
+url = "https://mirror.example.com/"
+
 [cloudflare_optimization]
 enabled = true
 "#,
-    ));
+    )
+    .unwrap();
 
-    assert!(result.is_err());
+    assert!(config.cloudflare_optimization.enabled);
+    assert_eq!(config.substituters[0].url.host(), "mirror.example.com");
 }
 
 #[test]
@@ -307,119 +347,28 @@ candidates = ["1.2.3.4", "5.6.7.8", "1.2.3.4"]
 }
 
 #[test]
-fn cloudflare_external_ip_list_requires_https() {
-    let result = AppConfiguration::deserialize(&make_config_string_overriden(
-        r#"
-[[substituters]]
-url = "https://nix-community.cachix.org/"
-
-[cloudflare_optimization]
-external_ip_lists = [{ url = "http://ips.example/cloudflare.txt" }]
-"#,
-    ));
-
-    assert!(result.is_err());
-}
-
-#[test]
-fn cloudflare_cache_proxy_routes_cache_nixos_org_through_proxy() {
+fn sni_proxy_sources_accept_file_http_and_https() {
     let config = AppConfiguration::deserialize(&make_config_string_overriden(
         r#"
-[cloudflare_cache_proxy]
-enabled = true
-url = "https://reverse-proxy.example/"
-
-[cloudflare_optimization]
-enabled = true
+[fastly_optimization]
+sni_proxy_sources = [
+  { url = "file:///tmp/fastly.txt" },
+  { url = "http://lists.example/fastly.txt" },
+  { url = "https://lists.example/fastly.txt" },
+]
 "#,
     ))
     .unwrap();
 
-    assert!(config.cloudflare_cache_proxy.enabled);
-    assert_eq!(
-        config.cloudflare_cache_proxy.url.unwrap().value(),
-        "https://reverse-proxy.example/"
-    );
-    assert_eq!(
-        config.substituters[0].url.value(),
-        "https://reverse-proxy.example/https/cache.nixos.org/"
-    );
-    assert_eq!(
-        config.substituters[0]
-            .url
-            .as_dir()
-            .join("nar/example.nar.xz")
-            .unwrap()
-            .value(),
-        "https://reverse-proxy.example/https/cache.nixos.org/nar/example.nar.xz"
-    );
-    assert!(config.cloudflare_cache_proxy.bandwidth_probe.enabled);
-    assert_eq!(
-        config.cloudflare_cache_proxy.bandwidth_probe.bytes.get(),
-        10 * 1024 * 1024
-    );
-    assert_eq!(
-        config
-            .cloudflare_cache_proxy
-            .bandwidth_probe
-            .refresh_interval,
-        Duration::from_secs(6 * 60 * 60)
-    );
+    assert_eq!(config.fastly_optimization.sni_proxy_sources.len(), 3);
 }
 
 #[test]
-fn cloudflare_cache_proxy_requires_url_when_enabled() {
-    let result = AppConfiguration::deserialize(&make_config_string_overriden(
-        r#"
-[cloudflare_cache_proxy]
-enabled = true
-"#,
-    ));
-
-    assert!(result.is_err());
-}
-
-#[test]
-fn cloudflare_cache_proxy_requires_https_url() {
-    let result = AppConfiguration::deserialize(&make_config_string_overriden(
-        r#"
-[cloudflare_cache_proxy]
-url = "http://download.example.com/"
-"#,
-    ));
-
-    assert!(result.is_err());
-}
-
-#[test]
-fn cloudflare_cache_proxy_requires_cache_nixos_org_substituter() {
-    let result = AppConfiguration::deserialize(
-        r#"
-[server]
-ip = "127.0.0.1"
-
-[[substituters]]
-url = "https://mirror.example.com/"
-
-[cloudflare_cache_proxy]
-enabled = true
-url = "https://download.example.com/"
-"#,
-    );
-
-    assert!(result.is_err());
-}
-
-#[test]
-fn fastly_and_cloudflare_cache_proxy_are_mutually_exclusive() {
+fn sni_proxy_sources_reject_unsupported_schemes() {
     let result = AppConfiguration::deserialize(&make_config_string_overriden(
         r#"
 [fastly_optimization]
-enabled = true
-
-[cloudflare_cache_proxy]
-enabled = true
-url = "https://download.example.com/"
+sni_proxy_sources = [{ url = "ftp://lists.example/fastly.txt" }]
 "#,
     ));
 
@@ -427,15 +376,54 @@ url = "https://download.example.com/"
 }
 
 #[test]
-fn cloudflare_cache_proxy_bandwidth_probe_rejects_non_nar_path() {
+fn cloudflare_http_reverse_proxy_configuration_was_removed() {
     let result = AppConfiguration::deserialize(&make_config_string_overriden(
         r#"
 [cloudflare_cache_proxy]
 enabled = true
 url = "https://reverse-proxy.example/"
+"#,
+    ));
 
-[cloudflare_cache_proxy.bandwidth_probe]
-nar_path = "https://other.example/nar/probe.nar.zst"
+    assert!(result.is_err());
+}
+
+#[test]
+fn fastly_and_cloudflare_keep_separate_sni_proxy_sources() {
+    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[[substituters]]
+url = "https://nix-community.cachix.org/"
+
+[fastly_optimization]
+enabled = true
+sni_proxy_sources = [{ url = "file:///tmp/fastly.txt" }]
+
+[cloudflare_optimization]
+enabled = true
+sni_proxy_sources = [{ url = "file:///tmp/cloudflare.txt" }]
+"#,
+    ))
+    .unwrap();
+
+    assert_eq!(
+        config.fastly_optimization.sni_proxy_sources[0].url.as_str(),
+        "file:///tmp/fastly.txt"
+    );
+    assert_eq!(
+        config.cloudflare_optimization.sni_proxy_sources[0]
+            .url
+            .as_str(),
+        "file:///tmp/cloudflare.txt"
+    );
+}
+
+#[test]
+fn bandwidth_probe_requires_https() {
+    let result = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[fastly_optimization.bandwidth_probe]
+url = "http://cache.nixos.org/nar/probe.nar.zst"
 "#,
     ));
 

@@ -145,7 +145,7 @@ impl GetDashboardOverviewUseCase {
                 ip: snapshot.ip,
                 source: match snapshot.source {
                     CandidateSource::DnsDoh => "DoH",
-                    CandidateSource::ExternalList => "external list",
+                    CandidateSource::SniProxy => "SNI proxy",
                     CandidateSource::UserConfigured => "configured",
                     CandidateSource::DerivedRegion => "derived",
                 }

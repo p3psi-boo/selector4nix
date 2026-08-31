@@ -8,9 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 
 ### Added
 
-- Added `cloudflare_cache_proxy`, which routes configured `cache.nixos.org` substituters through a Cloudflare-hosted reverse proxy using the `/{scheme}/{host}/{path}` URL convention. The reverse-proxy host can reuse `cloudflare_optimization` endpoint discovery and admission probing. It is mutually exclusive with `fastly_optimization` so exactly one cache.nixos.org acceleration path can be enabled.
-- Added active Cloudflare cache-proxy endpoint benchmarks: newly admitted or stale endpoints download a bounded 10 MiB Range from an immutable, larger cache.nixos.org NAR and are ranked by estimated download time. NAR bytes are discarded rather than cached.
-- Added `cloudflare_optimization.external_ip_lists` for HTTPS plain-text external preferred-IP lists, including blank-line and inline-comment filtering, in-memory refresh caching, and normal TLS/HTTP admission for every resulting IP.
+- Added automatic Cloudflare/Fastly classification for every configured substituter. Startup detection combines DoH A/CNAME evidence, the platforms' published IPv4 ranges, and CDN response-header fallback; detected hosts receive only their platform's endpoint candidates, SNI proxy sources, and bandwidth benchmark.
+- Added platform-specific `sni_proxy_sources` to both `fastly_optimization` and `cloudflare_optimization`. Sources may use `file://`, `http://`, or `https://`, contain one IPv4 or IPv6 address per line, and remain strictly separated between Fastly and Cloudflare.
+- Added end-to-end SNI proxy admission: only the TCP destination changes, while the original URL, HTTP Host, TLS SNI, and strict certificate verification remain intact.
+- Added active bounded-download benchmarks for both Fastly and Cloudflare endpoint managers. Newly admitted or stale direct endpoints and SNI proxies are ranked by measured TTFB and throughput; sample bytes are discarded.
+
+### Removed
+
+- Removed the unreleased `cloudflare_cache_proxy` HTTP URL-rewriting mode in favor of TLS-passthrough SNI proxy acceleration.
 
 ## [0.10.0] - 2026-08-23
 

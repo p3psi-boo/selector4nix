@@ -3,44 +3,23 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-/// Hosts eligible for Fastly endpoint optimization. The endpoint mechanism is
-/// generic, but only these hosts may enable it.
-pub const FASTLY_OPTIMIZATION_HOSTS: &[&str] = &["cache.nixos.org"];
-
 /// Cooling period after a transient endpoint failure before it may be probed again.
 pub const ENDPOINT_COOLING_PERIOD: Duration = Duration::from_secs(300);
 
-pub fn is_fastly_optimization_host(host: &str) -> bool {
-    FASTLY_OPTIMIZATION_HOSTS.contains(&host)
-}
-
+/// CDN platform whose endpoint candidates, SNI proxies, and bandwidth probe
+/// configuration apply to a substituter. The platform is detected at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EndpointOptimizationKind {
     Fastly,
     Cloudflare,
 }
 
-/// Determines which kind of endpoint optimization applies to a substituter
-/// host (independent of whether it is enabled; enablement lives in the
-/// configuration layer). Fastly: exact match against
-/// FASTLY_OPTIMIZATION_HOSTS; Cloudflare: host is `cachix.org` or ends with
-/// `.cachix.org`.
-pub fn endpoint_optimization_kind(host: &str) -> Option<EndpointOptimizationKind> {
-    if is_fastly_optimization_host(host) {
-        Some(EndpointOptimizationKind::Fastly)
-    } else if host == "cachix.org" || host.ends_with(".cachix.org") {
-        Some(EndpointOptimizationKind::Cloudflare)
-    } else {
-        None
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CandidateSource {
     /// Resolved via DNS-over-HTTPS at runtime.
     DnsDoh,
-    /// Loaded from a configured, externally maintained IP list.
-    ExternalList,
+    /// Loaded from a platform-specific local or remote SNI proxy list.
+    SniProxy,
     /// Explicitly listed in the configuration.
     UserConfigured,
     /// Derived from another candidate via Fastly region patterns.
@@ -330,43 +309,6 @@ mod tests {
         let incompatible = endpoint.on_failure(EndpointFailureKind::Certificate, now);
         assert_eq!(incompatible.state(), EndpointState::Incompatible);
         assert!(!incompatible.is_usable(now + ENDPOINT_COOLING_PERIOD));
-    }
-
-    #[test]
-    fn only_cache_nixos_org_is_eligible() {
-        assert!(is_fastly_optimization_host("cache.nixos.org"));
-        assert!(!is_fastly_optimization_host("other.example.com"));
-    }
-
-    #[test]
-    fn endpoint_optimization_kind_matches_fastly_hosts() {
-        assert_eq!(
-            endpoint_optimization_kind("cache.nixos.org"),
-            Some(EndpointOptimizationKind::Fastly)
-        );
-    }
-
-    #[test]
-    fn endpoint_optimization_kind_matches_cachix_hosts() {
-        assert_eq!(
-            endpoint_optimization_kind("nix-community.cachix.org"),
-            Some(EndpointOptimizationKind::Cloudflare)
-        );
-        assert_eq!(
-            endpoint_optimization_kind("foo.cachix.org"),
-            Some(EndpointOptimizationKind::Cloudflare)
-        );
-        assert_eq!(
-            endpoint_optimization_kind("cachix.org"),
-            Some(EndpointOptimizationKind::Cloudflare)
-        );
-    }
-
-    #[test]
-    fn endpoint_optimization_kind_rejects_other_hosts() {
-        assert_eq!(endpoint_optimization_kind("cachix.org.evil.com"), None);
-        assert_eq!(endpoint_optimization_kind("notcachix.org"), None);
-        assert_eq!(endpoint_optimization_kind("releases.nixos.org"), None);
     }
 
     #[test]

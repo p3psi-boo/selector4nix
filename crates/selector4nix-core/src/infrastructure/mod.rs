@@ -1,3 +1,4 @@
+pub mod cdn;
 pub mod config;
 pub mod dns;
 pub mod endpoint;

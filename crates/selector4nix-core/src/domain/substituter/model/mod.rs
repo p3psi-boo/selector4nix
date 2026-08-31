@@ -7,8 +7,7 @@ mod substituter_meta;
 pub use availability::Availability;
 pub use endpoint::{
     BandwidthMeasurement, CandidateSource, EndpointFailureKind, EndpointOptimizationKind,
-    EndpointSnapshot, EndpointSnapshotStatus, EndpointState, FASTLY_OPTIMIZATION_HOSTS,
-    SubstituterEndpoint, endpoint_optimization_kind, is_fastly_optimization_host,
+    EndpointSnapshot, EndpointSnapshotStatus, EndpointState, SubstituterEndpoint,
     order_for_selection,
 };
 pub use priority::{Priority, TryNewPriorityError};

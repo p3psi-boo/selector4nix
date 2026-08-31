@@ -14,23 +14,23 @@ use crate::domain::substituter::model::{
     CandidateSource, EndpointFailureKind, EndpointSnapshot, EndpointSnapshotStatus, EndpointState,
     SubstituterEndpoint, order_for_selection,
 };
-use crate::infrastructure::config::{BandwidthProbeConfiguration, ExternalIpListConfiguration};
+use crate::infrastructure::config::{BandwidthProbeConfiguration, SniProxySourceConfiguration};
 use crate::infrastructure::dns::doh_resolver::DohResolver;
 use crate::infrastructure::fastly::region_derivation::derive_region_candidates;
 use crate::infrastructure::provider::{
-    EndpointClientPool, EndpointClientSet, EndpointProbingProvider, ExternalIpListProvider,
-    ProbeEndpointError,
+    EndpointClientPool, EndpointClientSet, EndpointProbingProvider, ProbeEndpointError,
+    SniProxySourceProvider,
 };
 
 /// Maximum number of endpoints admission-probed concurrently during refresh.
 const PROBE_CONCURRENCY: usize = 8;
 
 /// Merge candidate IPs from all discovery sources, deduplicated; the first
-/// source (DoH — including discovery domains, then user-configured, then
-/// derived regions) wins.
+/// source (DoH — including discovery domains, then SNI proxy sources, then
+/// user-configured, then derived regions) wins.
 fn collect_candidates(
     discovered: &[Ipv4Addr],
-    externally_discovered: &[IpAddr],
+    sni_proxies: &[IpAddr],
     user_candidates: &[IpAddr],
     derive_regions: bool,
 ) -> Vec<(IpAddr, CandidateSource)> {
@@ -54,13 +54,8 @@ fn collect_candidates(
             &mut seen,
         );
     }
-    for ip in externally_discovered {
-        push(
-            *ip,
-            CandidateSource::ExternalList,
-            &mut candidates,
-            &mut seen,
-        );
+    for ip in sni_proxies {
+        push(*ip, CandidateSource::SniProxy, &mut candidates, &mut seen);
     }
     for ip in user_candidates {
         push(
@@ -71,7 +66,13 @@ fn collect_candidates(
         );
     }
     if derive_regions {
-        let seed: Vec<IpAddr> = candidates.iter().map(|(ip, _)| *ip).collect();
+        // SNI proxy addresses are relay nodes, not Fastly edge addresses, so
+        // the empirical Fastly region pattern must never be applied to them.
+        let seed: Vec<IpAddr> = candidates
+            .iter()
+            .filter(|(_, source)| *source != CandidateSource::SniProxy)
+            .map(|(ip, _)| *ip)
+            .collect();
         for ip in seed {
             if let IpAddr::V4(v4) = ip {
                 for derived in derive_region_candidates(&v4) {
@@ -102,10 +103,10 @@ pub struct EndpointManager {
     /// Third-party optimization domains whose DoH A records are added to the
     /// candidates (e.g. a Cloudflare preferred-IP domain); empty for Fastly.
     discovery_domains: Vec<String>,
-    /// Plain-text remote lists of Cloudflare endpoint IPs.
-    external_ip_lists: Vec<ExternalIpListConfiguration>,
-    external_ip_list_provider: Arc<ExternalIpListProvider>,
-    /// Optional active Range-download benchmark for a known-large NAR.
+    /// Platform-specific local or remote lists of SNI proxy IPs.
+    sni_proxy_sources: Vec<SniProxySourceConfiguration>,
+    sni_proxy_source_provider: Arc<SniProxySourceProvider>,
+    /// Optional active bounded-download benchmark for this platform.
     bandwidth_probe: Option<BandwidthProbeConfiguration>,
     /// First endpoint of the previous selection order, for change logging.
     last_selected: Mutex<Option<IpAddr>>,
@@ -122,8 +123,8 @@ impl EndpointManager {
         user_candidates: Vec<IpAddr>,
         derive_regions: bool,
         discovery_domains: Vec<String>,
-        external_ip_lists: Vec<ExternalIpListConfiguration>,
-        external_ip_list_provider: Arc<ExternalIpListProvider>,
+        sni_proxy_sources: Vec<SniProxySourceConfiguration>,
+        sni_proxy_source_provider: Arc<SniProxySourceProvider>,
         bandwidth_probe: Option<BandwidthProbeConfiguration>,
     ) -> Self {
         Self {
@@ -136,8 +137,8 @@ impl EndpointManager {
             user_candidates,
             derive_regions,
             discovery_domains,
-            external_ip_lists,
-            external_ip_list_provider,
+            sni_proxy_sources,
+            sni_proxy_source_provider,
             bandwidth_probe,
             last_selected: Mutex::new(None),
         }
@@ -164,14 +165,11 @@ impl EndpointManager {
             }
             discovered.extend(answers);
         }
-        let mut externally_discovered = Vec::new();
-        for list in &self.external_ip_lists {
-            externally_discovered.extend(self.external_ip_list_provider.endpoints(list).await);
+        let mut sni_proxies = Vec::new();
+        for source in &self.sni_proxy_sources {
+            sni_proxies.extend(self.sni_proxy_source_provider.endpoints(source).await);
         }
-        if discovered.is_empty()
-            && externally_discovered.is_empty()
-            && self.user_candidates.is_empty()
-        {
+        if discovered.is_empty() && sni_proxies.is_empty() && self.user_candidates.is_empty() {
             tracing::warn!(
                 host = %self.host,
                 "endpoint discovery yielded no candidates; keeping existing endpoints"
@@ -179,10 +177,19 @@ impl EndpointManager {
         }
         let candidates = collect_candidates(
             &discovered,
-            &externally_discovered,
+            &sni_proxies,
             &self.user_candidates,
             self.derive_regions,
         );
+
+        // Unlike DNS and explicitly configured candidates, SNI proxy lists
+        // are refreshable inventories. Drop relay nodes that disappeared from
+        // every current source so a local file edit or remote list refresh
+        // takes effect without restarting selector4nix.
+        let current_candidates: BTreeSet<IpAddr> = candidates.iter().map(|(ip, _)| *ip).collect();
+        self.endpoints.retain(|ip, endpoint| {
+            endpoint.source() != CandidateSource::SniProxy || current_candidates.contains(ip)
+        });
 
         for (ip, source) in &candidates {
             self.endpoints
@@ -288,12 +295,9 @@ impl EndpointManager {
 
         let results = futures::stream::iter(pending.into_iter().map(|endpoint| {
             let probing = Arc::clone(&self.probing);
-            let base_url = self.base_url.clone();
             let config = config.clone();
             async move {
-                let result = probing
-                    .benchmark_endpoint(&base_url, endpoint.ip(), &config)
-                    .await;
+                let result = probing.benchmark_endpoint(endpoint.ip(), &config).await;
                 (endpoint.ip(), result)
             }
         }))
@@ -420,7 +424,7 @@ mod tests {
     use selector4nix_streaming::throttler::{PerHostHttpThrottler, ThrottlingOptions};
 
     use super::*;
-    use crate::infrastructure::provider::{EndpointProbingProvider, ExternalIpListProvider};
+    use crate::infrastructure::provider::{EndpointProbingProvider, SniProxySourceProvider};
 
     fn ip(octet: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(151, 101, 1, octet))
@@ -453,7 +457,7 @@ mod tests {
             derive_regions,
             Vec::new(),
             Vec::new(),
-            Arc::new(ExternalIpListProvider::new()),
+            Arc::new(SniProxySourceProvider::new()),
             None,
         )
     }
@@ -514,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn external_list_candidates_are_merged_after_doh_and_before_configured_ips() {
+    fn sni_proxy_candidates_are_merged_after_doh_and_before_configured_ips() {
         let discovered = vec![Ipv4Addr::new(104, 16, 0, 1)];
         let external = vec![
             IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)),
@@ -536,7 +540,7 @@ mod tests {
                 ),
                 (
                     IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
-                    CandidateSource::ExternalList,
+                    CandidateSource::SniProxy,
                 ),
                 (
                     IpAddr::V4(Ipv4Addr::new(104, 18, 0, 1)),
@@ -572,6 +576,15 @@ mod tests {
         let mut sorted = ips.clone();
         sorted.sort();
         assert_eq!(sorted, deduped);
+    }
+
+    #[test]
+    fn region_derivation_does_not_expand_sni_proxy_addresses() {
+        let proxy = IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91));
+
+        let candidates = collect_candidates(&[], &[proxy], &[], true);
+
+        assert_eq!(candidates, vec![(proxy, CandidateSource::SniProxy)]);
     }
 
     #[test]

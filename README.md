@@ -11,6 +11,7 @@ A Nix substituter proxy with parallel cache queries and latency-aware selection.
 - Queries all configured substituters in parallel for `.narinfo` lookups
 - Selects the fastest responding substituter based on latency and priority
 - Automatically detects and skips unavailable substituters, retrying them with exponential backoff
+- Automatically classifies Cloudflare/Fastly substituters and benchmarks their platform-specific SNI proxies
 - Continuously probes substituters to detect failures early and verify recovery
 - Proxy private cache substituters with additional credentials
 - Pre-fetch multiple NAR file chunks concurrently to improve network utilization, based on sliding window
@@ -52,20 +53,23 @@ url = "https://selector4nix.cachix.org/"
 url = "https://cache.garnix.io/"
 storage_url = "https://garnix-cache.com/" # Garnix doesn't serve NAR files on https://cache.garnix.io/nar/
 
-# Use this instead of [fastly_optimization] to route cache.nixos.org through
-# a Cloudflare-hosted reverse proxy. Enable cloudflare_optimization as well to
-# select a preferred Cloudflare edge IP for the proxy host.
-[cloudflare_cache_proxy]
+# Each substituter's CDN is detected automatically from DoH/CNAME, published
+# edge ranges, and response headers. Fastly gets only the Fastly SNI list.
+[fastly_optimization]
 enabled = true
-url = "https://YOUR-CLOUDFLARE-PROXY.example/"
+sni_proxy_sources = [{ url = "file:///PATH/fastly-sni-proxies.txt" }]
 
-[cloudflare_cache_proxy.bandwidth_probe]
-# 10 MiB HTTP Range benchmark; selects measured endpoints by throughput + TTFB.
+[fastly_optimization.bandwidth_probe]
 enabled = true
 
+# Auto-detected Cloudflare substituters get only this Cloudflare SNI list. The
+# two platforms stay separate; sources may use file://, http://, or https://.
 [cloudflare_optimization]
 enabled = true
-# external_ip_lists = [{ url = "https://IP-LIST-SOURCE.example/cloudflare.txt" }]
+sni_proxy_sources = [{ url = "https://HOST/cloudflare-sni-proxies.txt" }]
+
+[cloudflare_optimization.bandwidth_probe]
+enabled = true
 ```
 
 For NixOS, nix-darwin, and Home Manager users, it is recommended to use the modules provided by this project for declarative setup and configuration.

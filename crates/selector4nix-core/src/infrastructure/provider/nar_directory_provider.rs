@@ -14,17 +14,27 @@ use crate::domain::nar_info::port::{
 };
 use crate::domain::substituter::model::SubstituterMeta;
 use crate::infrastructure::config::AppCredential;
+use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
+use crate::infrastructure::provider::nar_info_provider::{
+    classify_endpoint_failure, endpoint_ips_for,
+};
 
 pub struct ReqwestNarDirectoryProvider {
     client: Client,
     credentials: Arc<AppCredential>,
+    endpoint_managers: EndpointManagerRegistry,
 }
 
 impl ReqwestNarDirectoryProvider {
-    pub fn new(client: Client, credentials: Arc<AppCredential>) -> Self {
+    pub fn new(
+        client: Client,
+        credentials: Arc<AppCredential>,
+        endpoint_managers: EndpointManagerRegistry,
+    ) -> Self {
         Self {
             client,
             credentials,
+            endpoint_managers,
         }
     }
 }
@@ -45,16 +55,33 @@ impl NarDirectoryProvider for ReqwestNarDirectoryProvider {
         let mut pending = JoinSet::new();
         for substituter in substituters {
             let url = store_path_hash.on_substituter_listing(substituter);
-
-            let request = self.client.get(url.value()).headers(headers.to_headers());
-            let request = if let Some(credential) = self.credentials.lookup(&url) {
-                request.basic_auth(credential.login.clone(), credential.secret.clone())
-            } else {
-                request
-            };
-
+            let headers = headers.clone();
+            let client = self.client.clone();
+            let credentials = Arc::clone(&self.credentials);
+            let endpoint_managers = self.endpoint_managers.clone();
             let substituter_url = substituter.url().clone();
-            pending.spawn(get_response(request, substituter_url));
+            pending.spawn(async move {
+                if let Some((manager, ips)) = endpoint_ips_for(url.host(), &endpoint_managers) {
+                    for ip in ips {
+                        let Some(clients) = manager.client_for(ip) else {
+                            continue;
+                        };
+                        let request = build_request(&clients.http, &url, &headers, &credentials);
+                        match request.send().await {
+                            Ok(response) => return handle_response(response, substituter_url).await,
+                            Err(error) => {
+                                let kind = classify_endpoint_failure(&error);
+                                tracing::debug!(%url, %ip, ?kind, %error, "endpoint directory request failed; trying next endpoint");
+                                manager.report_failure(ip, kind);
+                            }
+                        }
+                    }
+                    tracing::warn!(%url, "all endpoints failed; falling back to default client");
+                }
+
+                let request = build_request(&client, &url, &headers, &credentials);
+                get_response(request, substituter_url).await
+            });
         }
 
         let mut has_error = false;
@@ -86,6 +113,20 @@ impl NarDirectoryProvider for ReqwestNarDirectoryProvider {
     }
 }
 
+fn build_request(
+    client: &Client,
+    url: &Url,
+    headers: &PassthroughHeaders,
+    credentials: &AppCredential,
+) -> RequestBuilder {
+    let request = client.get(url.value()).headers(headers.to_headers());
+    if let Some(credential) = credentials.lookup(url) {
+        request.basic_auth(credential.login.clone(), credential.secret.clone())
+    } else {
+        request
+    }
+}
+
 async fn get_response(
     request: RequestBuilder,
     substituter_url: Url,
@@ -103,6 +144,13 @@ async fn get_response(
         }
     };
 
+    handle_response(response, substituter_url).await
+}
+
+async fn handle_response(
+    response: reqwest::Response,
+    substituter_url: Url,
+) -> (Result<Option<ListDirectoryData>, ()>, ListDirectoryAttempt) {
     match response.status() {
         StatusCode::OK => {
             let content_type = response

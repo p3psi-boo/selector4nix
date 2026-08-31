@@ -32,14 +32,15 @@ streaming_chunk_max_len = 4194304
 # Maximum number of in-flight chunks per NAR file, also bounded by max_concurrent_requests (default: 8).
 streaming_window_max_len = 8
 
-# Fastly endpoint optimization for the official Nix cache (global section).
-# Only applies to the substituter whose host is cache.nixos.org; enabling this
-# requires such a substituter to be configured. The URL, HTTP Host, and TLS SNI
-# always remain cache.nixos.org with strict certificate verification — only the
-# TCP connection target IP is overridden (like `curl --resolve`). Candidates
-# come from DoH lookups (cloudflare-dns.com / dns.google, bypassing system DNS),
-# the candidates list below, and optionally derived regions. Each candidate must
-# pass an admission probe (TLS + GET /nix-cache-info returning 200) before use.
+# Fastly endpoint optimization for every automatically detected Fastly
+# substituter (global section). Detection uses DoH A/CNAME answers, Fastly's
+# published edge ranges, then Fastly response headers as a fallback. The URL,
+# HTTP Host, and TLS SNI always remain the substituter's own values with strict
+# certificate verification — only the TCP connection target IP is overridden
+# (like `curl --resolve`). Candidates come from DoH lookups
+# (cloudflare-dns.com / dns.google, bypassing system DNS), the candidates list
+# below, and optionally derived regions. Each candidate must pass an admission
+# probe (TLS + GET /nix-cache-info returning 200) before use.
 # Endpoint requests bypass environment proxies; under transparent proxies
 # (TUN/fake-ip) all endpoints share the same proxy chain, so this is of limited
 # benefit there. If no endpoint is usable, requests fall back to the default
@@ -52,31 +53,20 @@ candidates = []
 # Whether to derive additional regional endpoint candidates from the discovered
 # Fastly addresses, see https://github.com/IrineSistiana/mosdns/discussions/511 (default: false).
 derive_regions = false
+# Fastly-specific SNI proxy IP sources. Each source is a plain-text list with
+# one IPv4 or IPv6 address per line. file://, http://, and https:// are
+# supported. Keep these separate from Cloudflare SNI proxy sources.
+# sni_proxy_sources = [
+#   { url = "file:///PATH/fastly-sni-proxies.txt", refresh_secs = 3600 },
+#   { url = "https://HOST/fastly-sni-proxies.txt", refresh_secs = 3600 },
+# ]
 
-# Route the cache.nixos.org substituter through a Cloudflare-hosted reverse
-# proxy (default: disabled). The proxy must accept paths in the form
-# /{http,https}/example.com/path/to/file. With the value below, a request for
-# https://cache.nixos.org/nar/example.nar.xz becomes
-# https://YOUR-CLOUDFLARE-PROXY.example/https/cache.nixos.org/nar/example.nar.xz.
-# The original cache.nixos.org substituter stays in [[substituters]]; it is
-# rewritten automatically when this section is enabled. This mode and
-# fastly_optimization are mutually exclusive.
-[cloudflare_cache_proxy]
-# Whether to route cache.nixos.org requests through the reverse proxy (default: false).
-enabled = false
-# HTTPS origin of your Cloudflare-hosted reverse proxy. No query string or
-# fragment. Required only when enabled = true; no default is configured.
-# url = "https://YOUR-CLOUDFLARE-PROXY.example/"
-
-# Active Range-download benchmark for every newly admitted or expired endpoint
-# of cloudflare_cache_proxy. It downloads only a bounded byte range of an
-# immutable cache.nixos.org NAR that is larger than 10 MiB; NAR content is not
-# cached. The measured TTFB and MiB/s determine endpoint order.
-[cloudflare_cache_proxy.bandwidth_probe]
-# Whether to actively benchmark cache-proxy endpoints (default: true).
+# Active bounded download through every admitted Fastly endpoint and SNI proxy.
+# The measured TTFB and MiB/s determine endpoint order.
+[fastly_optimization.bandwidth_probe]
 enabled = true
-# Relative NAR path used for the Range request. It must begin with nar/.
-nar_path = "nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst"
+# HTTPS sample URL. The default is an immutable cache.nixos.org NAR larger than 10 MiB.
+url = "https://cache.nixos.org/nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst"
 # Number of bytes downloaded per benchmark (default: 10485760 = 10 MiB).
 bytes = 10485760
 # Re-benchmark an endpoint after this interval (default: 21600 = 6 hours).
@@ -84,20 +74,18 @@ refresh_secs = 21600
 # Maximum simultaneous benchmark downloads (default: 2).
 max_concurrent_probes = 2
 
-# Cloudflare endpoint optimization for Cachix substituters and the optional
-# cloudflare_cache_proxy host (global section). Enable this together with
-# cloudflare_cache_proxy to discover, admission-probe, and select the fastest
-# Cloudflare edge IP for that proxy. It also applies to substituters whose host
-# is cachix.org or *.cachix.org. Any Cloudflare edge IP serves the correct
-# certificate by SNI, so faster IPs can be discovered via third-party
-# optimized-IP domains. The URL, HTTP Host, and TLS SNI always remain the
-# substituter's own host with strict certificate verification — only the TCP
-# connection target IP is overridden (like `curl --resolve`). Candidates come
-# from DoH lookups of the substituter's own domain, the discovery_domains
-# below, and the candidates list. Each candidate must pass an admission probe
-# (TLS + GET /nix-cache-info returning 200) before use. Endpoint requests
-# bypass environment proxies; if no endpoint is usable, requests fall back to
-# the default system-DNS path, behaving as if disabled.
+# Cloudflare endpoint optimization for every automatically detected Cloudflare
+# substituter (global section), including but not limited to Cachix. Detection
+# uses DoH A/CNAME answers, Cloudflare's published edge ranges, then Cloudflare
+# response headers as a fallback. Any Cloudflare edge IP serves the correct
+# certificate by SNI, so faster IPs can be discovered via third-party optimized-
+# IP domains. The URL, HTTP Host, and TLS SNI always remain the substituter's own
+# host with strict certificate verification — only the TCP connection target IP
+# is overridden (like `curl --resolve`). Candidates come from DoH lookups of the
+# substituter's own domain, the discovery_domains below, and the candidates
+# list. Each candidate must pass an admission probe (TLS + GET /nix-cache-info
+# returning 200) before use. Endpoint requests bypass environment proxies; if
+# no endpoint is usable, requests fall back to the default system-DNS path.
 [cloudflare_optimization]
 # Whether to enable Cloudflare endpoint optimization (default: false).
 enabled = false
@@ -109,13 +97,24 @@ candidates = []
 # must pass the admission probe anyway, a stale domain merely yields fewer
 # candidates. Set to [] to disable this source.
 discovery_domains = ["cloudflare.182682.xyz"]
-# Optional HTTPS plain-text IP lists. One IPv4 or IPv6 address per line;
+# Cloudflare-specific SNI proxy lists. One IPv4 or IPv6 address per line;
 # blank lines, full-line comments, and inline # comments are ignored. Domains,
-# CIDRs, and IP:port entries are rejected. The last successful list stays in
-# memory when a refresh fails, but each listed IP still needs admission.
-# external_ip_lists = [
-#   { url = "https://IP-LIST-SOURCE.example/cloudflare.txt", refresh_secs = 3600 },
+# CIDRs, and IP:port entries are rejected. Sources may use file://, http://, or
+# https://. The last successful list stays in memory after a refresh failure.
+# sni_proxy_sources = [
+#   { url = "file:///PATH/cloudflare-sni-proxies.txt", refresh_secs = 3600 },
+#   { url = "https://HOST/cloudflare-sni-proxies.txt", refresh_secs = 3600 },
 # ]
+
+# Active bounded download through every admitted Cloudflare endpoint and SNI
+# proxy. The default URL returns exactly `bytes` bytes from Cloudflare's speed
+# endpoint. Override it with another HTTPS URL that serves at least `bytes`.
+[cloudflare_optimization.bandwidth_probe]
+enabled = true
+url = "https://speed.cloudflare.com/__down?bytes=10485760"
+bytes = 10485760
+refresh_secs = 21600
+max_concurrent_probes = 2
 
 # Proxy behavior settings.
 [proxy]

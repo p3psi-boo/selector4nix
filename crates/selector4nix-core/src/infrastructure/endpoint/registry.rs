@@ -46,7 +46,7 @@ mod tests {
     use crate::domain::common::url::Url;
     use crate::infrastructure::dns::doh_resolver::DohResolver;
     use crate::infrastructure::provider::{
-        EndpointClientPool, EndpointProbingProvider, ExternalIpListProvider,
+        EndpointClientPool, EndpointProbingProvider, SniProxySourceProvider,
     };
 
     fn make_manager(host: &str) -> Arc<EndpointManager> {
@@ -76,7 +76,7 @@ mod tests {
             false,
             Vec::new(),
             Vec::new(),
-            Arc::new(ExternalIpListProvider::new()),
+            Arc::new(SniProxySourceProvider::new()),
             None,
         ))
     }
