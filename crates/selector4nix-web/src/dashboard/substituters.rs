@@ -86,7 +86,7 @@ fn parse_optional_priority(value: Option<&str>) -> Result<Priority, AppError> {
     }
 }
 
-async fn respond_mutation(
+pub(crate) async fn respond_mutation(
     ctx: &AppContext,
     headers: &HeaderMap,
     result: Result<(), AppError>,

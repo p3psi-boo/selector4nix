@@ -149,10 +149,8 @@ impl GetDashboardOverviewUseCase {
             .map(|snapshot| OverviewEndpointItemData {
                 ip: snapshot.ip,
                 source: match snapshot.source {
-                    CandidateSource::DnsDoh => "DoH",
                     CandidateSource::SniProxy => "SNI proxy",
                     CandidateSource::UserConfigured => "configured",
-                    CandidateSource::DerivedRegion => "derived",
                 }
                 .to_string(),
                 status: match snapshot.status {

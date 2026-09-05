@@ -1,6 +1,7 @@
 mod cache;
 mod configuration;
 mod overview;
+mod sni_proxies;
 mod statics;
 mod substituters;
 mod transferring;
@@ -8,6 +9,7 @@ mod transferring;
 pub use cache::get_cache_page;
 pub use configuration::get_configuration_page;
 pub use overview::get_overview_page;
+pub use sni_proxies::post_add_sni_proxy;
 pub use statics::get_static_asset;
 pub use substituters::{post_add_substituter, post_disable_substituter, post_enable_substituter};
 pub use transferring::get_transferring_page;

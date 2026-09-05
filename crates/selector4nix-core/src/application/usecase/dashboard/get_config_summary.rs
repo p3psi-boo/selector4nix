@@ -52,17 +52,12 @@ impl GetDashboardConfigSummaryUseCase {
             entries: vec![
                 ConfigSummaryEntryData {
                     name: "Enabled",
-                    description: "Endpoint optimization for auto-detected Fastly substituters.",
+                    description: "SNI proxy optimization for auto-detected Fastly substituters.",
                     value: cfg.enabled.to_string(),
                 },
                 ConfigSummaryEntryData {
-                    name: "Derived region candidates",
-                    description: "Derive additional endpoint candidates from Fastly region patterns.",
-                    value: cfg.derive_regions.to_string(),
-                },
-                ConfigSummaryEntryData {
-                    name: "Configured candidates",
-                    description: "Number of explicitly configured endpoint candidate IPs.",
+                    name: "Configured SNI proxy IPs",
+                    description: "Number of extra SNI proxy IPs listed in the configuration.",
                     value: format!("{}", cfg.candidates.len()),
                 },
                 ConfigSummaryEntryData {
@@ -86,18 +81,13 @@ impl GetDashboardConfigSummaryUseCase {
             entries: vec![
                 ConfigSummaryEntryData {
                     name: "Enabled",
-                    description: "Endpoint optimization for auto-detected Cloudflare substituters.",
+                    description: "SNI proxy optimization for auto-detected Cloudflare substituters.",
                     value: cfg.enabled.to_string(),
                 },
                 ConfigSummaryEntryData {
-                    name: "Configured candidates",
-                    description: "Number of explicitly configured endpoint candidate IPs.",
+                    name: "Configured SNI proxy IPs",
+                    description: "Number of extra SNI proxy IPs listed in the configuration.",
                     value: cfg.candidates.len().to_string(),
-                },
-                ConfigSummaryEntryData {
-                    name: "Discovery domains",
-                    description: "Number of Cloudflare preferred-IP discovery domains.",
-                    value: cfg.discovery_domains.len().to_string(),
                 },
                 ConfigSummaryEntryData {
                     name: "SNI proxy sources",

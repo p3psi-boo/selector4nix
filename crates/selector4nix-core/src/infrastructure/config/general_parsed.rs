@@ -274,7 +274,6 @@ impl TryFrom<CacheRawConfiguration> for CacheConfiguration {
 pub struct FastlyOptimizationConfiguration {
     pub enabled: bool,
     pub candidates: Vec<IpAddr>,
-    pub derive_regions: bool,
     pub sni_proxy_sources: Vec<SniProxySourceConfiguration>,
     pub bandwidth_probe: BandwidthProbeConfiguration,
 }
@@ -284,7 +283,6 @@ impl Default for FastlyOptimizationConfiguration {
         Self {
             enabled: false,
             candidates: Vec::new(),
-            derive_regions: false,
             sni_proxy_sources: Vec::new(),
             bandwidth_probe: BandwidthProbeConfiguration::fastly_default(),
         }
@@ -298,7 +296,6 @@ impl TryFrom<FastlyOptimizationRawConfiguration> for FastlyOptimizationConfigura
         let FastlyOptimizationRawConfiguration {
             enabled,
             candidates: raw_candidates,
-            derive_regions,
             sni_proxy_sources,
             bandwidth_probe,
         } = raw;
@@ -311,7 +308,6 @@ impl TryFrom<FastlyOptimizationRawConfiguration> for FastlyOptimizationConfigura
         Ok(Self {
             enabled: enabled.unwrap_or(false),
             candidates,
-            derive_regions: derive_regions.unwrap_or(false),
             sni_proxy_sources: parse_sni_proxy_sources(sni_proxy_sources)?,
             bandwidth_probe: BandwidthProbeConfiguration::for_fastly(
                 bandwidth_probe.unwrap_or_default(),
@@ -324,7 +320,6 @@ impl TryFrom<FastlyOptimizationRawConfiguration> for FastlyOptimizationConfigura
 pub struct CloudflareOptimizationConfiguration {
     pub enabled: bool,
     pub candidates: Vec<IpAddr>,
-    pub discovery_domains: Vec<String>,
     pub sni_proxy_sources: Vec<SniProxySourceConfiguration>,
     pub bandwidth_probe: BandwidthProbeConfiguration,
 }
@@ -334,15 +329,10 @@ impl Default for CloudflareOptimizationConfiguration {
         Self {
             enabled: false,
             candidates: Vec::new(),
-            discovery_domains: default_cloudflare_discovery_domains(),
             sni_proxy_sources: Vec::new(),
             bandwidth_probe: BandwidthProbeConfiguration::cloudflare_default(),
         }
     }
-}
-
-fn default_cloudflare_discovery_domains() -> Vec<String> {
-    vec!["cloudflare.182682.xyz".to_string()]
 }
 
 impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationConfiguration {
@@ -352,7 +342,6 @@ impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationC
         let CloudflareOptimizationRawConfiguration {
             enabled,
             candidates: raw_candidates,
-            discovery_domains,
             sni_proxy_sources,
             bandwidth_probe,
         } = raw;
@@ -365,8 +354,6 @@ impl TryFrom<CloudflareOptimizationRawConfiguration> for CloudflareOptimizationC
         Ok(Self {
             enabled: enabled.unwrap_or(false),
             candidates,
-            discovery_domains: discovery_domains
-                .unwrap_or_else(default_cloudflare_discovery_domains),
             sni_proxy_sources: parse_sni_proxy_sources(sni_proxy_sources)?,
             bandwidth_probe: BandwidthProbeConfiguration::for_cloudflare(
                 bandwidth_probe.unwrap_or_default(),

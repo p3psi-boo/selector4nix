@@ -25,6 +25,7 @@ use selector4nix_core::application::usecase::nar_file::StreamNarFileUseCase;
 use selector4nix_core::application::usecase::nar_info::{
     ListNarInnerDirectoryUseCase, ResolveNarInfoUseCase,
 };
+use selector4nix_core::application::usecase::sni_proxy::AddSniProxyUseCase;
 use selector4nix_core::application::usecase::substituter::{
     AddSubstituterUseCase, DisableSubstituterUseCase, EnableSubstituterUseCase,
 };
@@ -176,9 +177,9 @@ pub async fn init_context(
         }
     };
 
-    // Endpoint optimization auto-detects the CDN platform of every unique
+    // SNI proxy optimization auto-detects the CDN platform of every unique
     // substituter host, then assembles one `EndpointManager` per recognized
-    // host with that platform's strictly separate candidate and SNI lists.
+    // host with that platform's strictly separate SNI proxy list.
     let (streaming_http_client, endpoint_managers) = if config.fastly_optimization.enabled
         || config.cloudflare_optimization.enabled
     {
@@ -240,24 +241,16 @@ pub async fn init_context(
                 "detected substituter CDN platform"
             );
 
-            let (
-                user_candidates,
-                derive_regions,
-                discovery_domains,
-                platform_sni_proxy_sources,
-                bandwidth_probe,
-            ) = match detection.kind {
+            let (user_candidates, platform_sni_proxy_sources, bandwidth_probe) = match detection
+                .kind
+            {
                 EndpointOptimizationKind::Fastly if config.fastly_optimization.enabled => (
                     config.fastly_optimization.candidates.clone(),
-                    config.fastly_optimization.derive_regions,
-                    Vec::new(),
                     config.fastly_optimization.sni_proxy_sources.clone(),
                     config.fastly_optimization.bandwidth_probe.clone(),
                 ),
                 EndpointOptimizationKind::Cloudflare if config.cloudflare_optimization.enabled => (
                     config.cloudflare_optimization.candidates.clone(),
-                    false,
-                    config.cloudflare_optimization.discovery_domains.clone(),
                     config.cloudflare_optimization.sni_proxy_sources.clone(),
                     config.cloudflare_optimization.bandwidth_probe.clone(),
                 ),
@@ -287,7 +280,6 @@ pub async fn init_context(
                 config.network.nar_info_timeout,
             ));
             let user_candidate_count = user_candidates.len();
-            let discovery_domain_count = discovery_domains.len();
             let sni_proxy_source_count = platform_sni_proxy_sources.len();
             let active_bandwidth_probe = bandwidth_probe.enabled;
             let manager = Arc::new(EndpointManager::new(
@@ -295,10 +287,7 @@ pub async fn init_context(
                 base_url,
                 pool,
                 probing,
-                Arc::clone(&doh),
                 user_candidates,
-                derive_regions,
-                discovery_domains,
                 platform_sni_proxy_sources,
                 Arc::clone(&sni_proxy_sources),
                 Some(bandwidth_probe),
@@ -308,11 +297,9 @@ pub async fn init_context(
                 %host,
                 platform = ?detection.kind,
                 user_candidates = user_candidate_count,
-                derive_regions,
-                discovery_domains = discovery_domain_count,
                 sni_proxy_sources = sni_proxy_source_count,
                 active_bandwidth_probe,
-                "endpoint optimization enabled for auto-detected substituter"
+                "SNI proxy optimization enabled for auto-detected substituter"
             );
             managers.push(manager);
         }
@@ -560,6 +547,8 @@ pub async fn init_context(
         substituter_repository.clone(),
         substituter_registry.clone(),
     );
+    let add_sni_proxy_usecase =
+        AddSniProxyUseCase::new(substituter_repository.clone(), endpoint_managers.clone());
 
     let get_dashboard_overview_usecase = GetDashboardOverviewUseCase::new(
         substituter_repository,
@@ -598,6 +587,7 @@ pub async fn init_context(
         add_substituter_usecase,
         enable_substituter_usecase,
         disable_substituter_usecase,
+        add_sni_proxy_usecase,
         cache_info: config.cache_info.clone(),
     }))
 }

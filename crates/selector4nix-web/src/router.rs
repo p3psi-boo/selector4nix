@@ -41,6 +41,7 @@ pub fn build_router(ctx: Arc<AppContext>) -> Router {
             "/dashboard/substituters/disable",
             post(post_disable_substituter),
         )
+        .route("/dashboard/sni-proxies", post(post_add_sni_proxy))
         .route("/dashboard/transferring", get(get_transferring_page))
         .route("/dashboard/cache", get(get_cache_page))
         .route("/dashboard/configuration", get(get_configuration_page))

@@ -132,7 +132,6 @@ fn fastly_optimization_defaults_to_disabled() {
 
     assert!(!config.fastly_optimization.enabled);
     assert!(config.fastly_optimization.candidates.is_empty());
-    assert!(!config.fastly_optimization.derive_regions);
     assert!(config.fastly_optimization.sni_proxy_sources.is_empty());
     assert!(config.fastly_optimization.bandwidth_probe.enabled);
 }
@@ -144,7 +143,6 @@ fn fastly_optimization_is_parsed_when_enabled() {
 [fastly_optimization]
 enabled = true
 candidates = ["151.101.1.91", "151.101.65.91"]
-derive_regions = true
 sni_proxy_sources = [
   { url = "file:///tmp/fastly-sni-proxies.txt", refresh_secs = 60 },
 ]
@@ -164,7 +162,6 @@ bytes = 1048576
             "151.101.65.91".parse::<std::net::IpAddr>().unwrap(),
         ],
     );
-    assert!(config.fastly_optimization.derive_regions);
     assert_eq!(config.fastly_optimization.sni_proxy_sources.len(), 1);
     assert_eq!(
         config.fastly_optimization.bandwidth_probe.url.value(),
@@ -233,10 +230,6 @@ fn cloudflare_optimization_defaults_to_disabled() {
 
     assert!(!config.cloudflare_optimization.enabled);
     assert!(config.cloudflare_optimization.candidates.is_empty());
-    assert_eq!(
-        config.cloudflare_optimization.discovery_domains,
-        vec!["cloudflare.182682.xyz".to_string()],
-    );
     assert!(config.cloudflare_optimization.sni_proxy_sources.is_empty());
     assert!(config.cloudflare_optimization.bandwidth_probe.enabled);
     assert_eq!(
@@ -255,7 +248,6 @@ url = "https://nix-community.cachix.org/"
 [cloudflare_optimization]
 enabled = true
 candidates = ["1.2.3.4"]
-discovery_domains = ["cf.example.com"]
 sni_proxy_sources = [
   { url = "http://ips.example/cloudflare.txt", refresh_secs = 900 },
   { url = "file:///tmp/cloudflare-sni-proxies.txt" },
@@ -272,10 +264,6 @@ bytes = 2097152
     assert_eq!(
         config.cloudflare_optimization.candidates,
         vec!["1.2.3.4".parse::<std::net::IpAddr>().unwrap()],
-    );
-    assert_eq!(
-        config.cloudflare_optimization.discovery_domains,
-        vec!["cf.example.com".to_string()],
     );
     assert_eq!(config.cloudflare_optimization.sni_proxy_sources.len(), 2);
     assert_eq!(
@@ -315,16 +303,22 @@ enabled = true
 }
 
 #[test]
-fn cloudflare_optimization_explicit_empty_discovery_domains_stays_empty() {
-    let config = AppConfiguration::deserialize(&make_config_string_overriden(
+fn dns_endpoint_discovery_fields_are_rejected() {
+    let derive_regions = AppConfiguration::deserialize(&make_config_string_overriden(
+        r#"
+[fastly_optimization]
+derive_regions = true
+"#,
+    ));
+    let discovery_domains = AppConfiguration::deserialize(&make_config_string_overriden(
         r#"
 [cloudflare_optimization]
-discovery_domains = []
+discovery_domains = ["cloudflare.182682.xyz"]
 "#,
-    ))
-    .unwrap();
+    ));
 
-    assert!(config.cloudflare_optimization.discovery_domains.is_empty());
+    assert!(derive_regions.is_err());
+    assert!(discovery_domains.is_err());
 }
 
 #[test]

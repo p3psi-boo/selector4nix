@@ -74,7 +74,6 @@ pub struct CacheRawConfiguration {
 pub struct FastlyOptimizationRawConfiguration {
     pub enabled: Option<bool>,
     pub candidates: Option<Vec<IpAddr>>,
-    pub derive_regions: Option<bool>,
     pub sni_proxy_sources: Option<Vec<SniProxySourceRawConfiguration>>,
     pub bandwidth_probe: Option<BandwidthProbeRawConfiguration>,
 }
@@ -84,7 +83,6 @@ pub struct FastlyOptimizationRawConfiguration {
 pub struct CloudflareOptimizationRawConfiguration {
     pub enabled: Option<bool>,
     pub candidates: Option<Vec<IpAddr>>,
-    pub discovery_domains: Option<Vec<String>>,
     pub sni_proxy_sources: Option<Vec<SniProxySourceRawConfiguration>>,
     pub bandwidth_probe: Option<BandwidthProbeRawConfiguration>,
 }

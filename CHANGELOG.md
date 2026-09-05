@@ -8,15 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 
 ### Added
 
-- Added automatic Cloudflare/Fastly classification for every configured substituter. Startup detection combines DoH A/CNAME evidence, the platforms' published IPv4 ranges, and CDN response-header fallback; detected hosts receive only their platform's endpoint candidates, SNI proxy sources, and bandwidth benchmark.
+- Added automatic Cloudflare/Fastly classification for every configured substituter. Startup detection combines DoH A/CNAME evidence, the platforms' published IPv4 ranges, and CDN response-header fallback; detected hosts receive only their platform's SNI proxy sources and bandwidth benchmark.
 - Added platform-specific `sni_proxy_sources` to both `fastly_optimization` and `cloudflare_optimization`. Sources may use `file://`, `http://`, or `https://`, contain one IPv4 or IPv6 address per line, and remain strictly separated between Fastly and Cloudflare.
 - Added end-to-end SNI proxy admission: only the TCP destination changes, while the original URL, HTTP Host, TLS SNI, and strict certificate verification remain intact.
-- Added active bounded-download benchmarks for both Fastly and Cloudflare endpoint managers. Newly admitted or stale direct endpoints and SNI proxies are ranked by measured TTFB and throughput; sample bytes are discarded.
+- Added active bounded-download benchmarks for both Fastly and Cloudflare SNI proxies. Newly admitted or stale proxies are ranked by measured TTFB and throughput; sample bytes are discarded.
 - Added runtime substituter management on the dashboard overview page. Substituters can be added, enabled, and disabled while the process is running, including when the configuration file is read-only. Runtime changes are not written back to the configuration file and are lost on restart. At least one substituter must remain enabled.
+- Added runtime SNI proxy management on the dashboard overview page. Extra proxy IPs can be added to a substituter that already has Fastly or Cloudflare optimization; they are admission-probed immediately and discarded on restart.
+
+### Changed
+
+- Fastly and Cloudflare optimization now use only SNI proxies. DoH lookups of the substituter, Cloudflare `discovery_domains`, and Fastly `derive_regions` are no longer used as endpoint candidates. Extra IP literals in `candidates` are treated as additional SNI proxy IPs. CDN detection still uses DoH so each host gets the matching platform's proxy list.
 
 ### Removed
 
 - Removed the unreleased `cloudflare_cache_proxy` HTTP URL-rewriting mode in favor of TLS-passthrough SNI proxy acceleration.
+- Removed `fastly_optimization.derive_regions` and `cloudflare_optimization.discovery_domains`. Existing configuration files that set these fields are rejected.
 
 ## [0.10.0] - 2026-08-23
 

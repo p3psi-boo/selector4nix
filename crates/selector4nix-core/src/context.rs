@@ -5,6 +5,7 @@ use crate::application::usecase::dashboard::{
 use crate::application::usecase::derivation::GetDerivationLogUseCase;
 use crate::application::usecase::nar_file::StreamNarFileUseCase;
 use crate::application::usecase::nar_info::{ListNarInnerDirectoryUseCase, ResolveNarInfoUseCase};
+use crate::application::usecase::sni_proxy::AddSniProxyUseCase;
 use crate::application::usecase::substituter::{
     AddSubstituterUseCase, DisableSubstituterUseCase, EnableSubstituterUseCase,
 };
@@ -22,5 +23,6 @@ pub struct AppContext {
     pub add_substituter_usecase: AddSubstituterUseCase,
     pub enable_substituter_usecase: EnableSubstituterUseCase,
     pub disable_substituter_usecase: DisableSubstituterUseCase,
+    pub add_sni_proxy_usecase: AddSniProxyUseCase,
     pub cache_info: CacheInfoConfiguration,
 }

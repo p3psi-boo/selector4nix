@@ -230,5 +230,53 @@
         </div>
       </form>
     </section>
+
+    <section>
+      <h2 class="mb-3 font-semibold">Add SNI proxy</h2>
+      <p class="mb-3 text-sm text-muted">
+        Adds an extra SNI proxy IP to a substituter that already has Fastly or Cloudflare optimization. The address is
+        probed immediately and is not written back to the configuration file.
+      </p>
+
+      <form
+        class="rounded-card border border-line bg-surface p-4"
+        method="post"
+        action="/dashboard/sni-proxies"
+        hx-post="/dashboard/sni-proxies"
+        hx-target="#overview"
+        hx-select="#overview"
+        hx-swap="outerHTML"
+        hx-on::after-request="if (event.detail.xhr.getResponseHeader('HX-Trigger') === 'sni-proxy-added') this.reset()"
+      >
+        <div class="flex flex-col gap-3 md:flex-row md:items-end">
+          <label class="flex min-w-0 flex-1 flex-col gap-1">
+            <span class="text-sm font-medium">Substituter URL</span>
+            <input
+              type="url"
+              name="url"
+              required
+              placeholder="https://cache.nixos.org/"
+              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
+            />
+          </label>
+          <label class="flex min-w-0 flex-1 flex-col gap-1">
+            <span class="text-sm font-medium">Proxy IP</span>
+            <input
+              type="text"
+              name="ip"
+              required
+              placeholder="203.0.113.10"
+              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
+            />
+          </label>
+          <button
+            type="submit"
+            class="inline-flex items-center justify-center rounded bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg transition-colors hover:bg-accent/90"
+          >
+            Add
+          </button>
+        </div>
+      </form>
+    </section>
   </div>
 {% endblock %}

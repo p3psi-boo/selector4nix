@@ -99,13 +99,13 @@ Fastly endpoint and SNI proxy optimization for automatically detected Fastly sub
 
 When either CDN optimization section is enabled, selector4nix classifies every unique configured substituter host at startup. It first queries A and CNAME records through both DoH resolvers, compares returned addresses with the official [Cloudflare IPv4 ranges](https://www.cloudflare.com/ips-v4/) and [Fastly public IP list](https://api.fastly.com/public-ip-list), and recognizes the corresponding CDN CNAME suffixes. If DNS evidence is inconclusive, it requests the substituter's `nix-cache-info` and checks Cloudflare or Fastly response headers. Conflicting or unknown evidence is left unclassified and uses the normal system-DNS path. Detection results and their evidence are written to the log.
 
-When `fastly_optimization.enabled` is true, every substituter classified as Fastly is sent through Fastly edge endpoints and SNI proxies discovered and probed at runtime. Hostnames are not hard-coded: `cache.nixos.org` is one normal detected Fastly host, and other Fastly-backed substituters are handled the same way. Only the TCP connection target IP is overridden (equivalent to `curl --resolve`); each substituter's request URL, HTTP `Host` header, TLS SNI, and strict certificate verification remain unchanged.
+When `fastly_optimization.enabled` is true, every substituter classified as Fastly is sent through Fastly-specific SNI proxies. Hostnames are not hard-coded: `cache.nixos.org` is one normal detected Fastly host, and other Fastly-backed substituters are handled the same way. Only the TCP connection target IP is overridden (equivalent to `curl --resolve`); each substituter's request URL, HTTP `Host` header, TLS SNI, and strict certificate verification remain unchanged.
 
-Candidate endpoints come from four sources: DNS-over-HTTPS lookups against `cloudflare-dns.com` and `dns.google` (bypassing the system DNS, so fake-ip environments work too), IP literals configured via `candidates`, region-derived candidates when `derive_regions` is enabled, and Fastly-specific SNI proxy IP lists configured in `sni_proxy_sources`. SNI proxy list entries are never mixed with the Cloudflare platform. Every candidate must pass an end-to-end admission probe — a TLS handshake plus `GET /nix-cache-info` through that IP — before it is considered usable. The original URL, Host, SNI, and certificate verification remain intact, so an SNI proxy is admitted only when it forwards the original TLS connection correctly.
+Candidates come from Fastly-specific `sni_proxy_sources` and extra IP literals in `candidates`. They are never mixed with the Cloudflare platform. Every candidate must pass an end-to-end admission probe — a TLS handshake plus `GET /nix-cache-info` through that IP — before it is considered usable. The original URL, Host, SNI, and certificate verification remain intact, so a proxy is admitted only when it forwards the original TLS connection correctly.
 
-Newly admitted and stale endpoints are actively benchmarked with a bounded HTTPS download. Endpoints are ordered by estimated 10 MiB download time using measured TTFB and throughput; NAR bytes are discarded instead of cached. A failed benchmark does not revoke admission. A failing request automatically tries another endpoint and then the default system-DNS path.
+Newly admitted and stale proxies are actively benchmarked with a bounded HTTPS download. They are ordered by estimated 10 MiB download time using measured TTFB and throughput; NAR bytes are discarded instead of cached. A failed benchmark does not revoke admission. A failing request automatically tries another proxy and then the default system-DNS path.
 
-Note that endpoint requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. Under transparent proxies (TUN/fake-ip), all endpoints go through the same proxy chain, so endpoint preference is of limited benefit there — DoH-based discovery still works in that case. All Range requests of a chunked NAR download are pinned to the same endpoint, and the concurrency quota is still shared per logical host.
+Note that SNI proxy requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. All Range requests of a chunked NAR download are pinned to the same proxy, and the concurrency quota is still shared per logical host.
 
 Enabling this section does not require a particular hostname. If no configured substituter is detected as Fastly, this section remains idle and changes no request path.
 
@@ -121,14 +121,7 @@ Whether Fastly endpoint optimization is enabled.
 - Type: Array of IP Address
 - Default: `[]`
 
-Additional seed endpoint candidates as IP literals. Domain names are not accepted.
-
-### `fastly_optimization.derive_regions`
-
-- Type: Boolean
-- Default: `false`
-
-Whether to derive additional regional endpoint candidates from the discovered Fastly addresses (see [mosdns discussion #511](https://github.com/IrineSistiana/mosdns/discussions/511)).
+Additional SNI proxy IPs as literals. Domain names are not accepted.
 
 ### `fastly_optimization.sni_proxy_sources`
 
@@ -183,13 +176,11 @@ Active bounded-download benchmark settings. The default URL is an immutable `cac
 
 Cloudflare endpoint and SNI proxy optimization for automatically detected Cloudflare substituters. This is a global section and does not belong to any single substituter.
 
-When enabled, every substituter classified as Cloudflare is sent through admitted Cloudflare edge or SNI proxy IPs. This includes Cachix hosts, but is not limited to a hostname suffix. Only the TCP connection target IP is overridden; the request URL, HTTP `Host`, TLS SNI, and strict certificate verification remain unchanged.
+When enabled, every substituter classified as Cloudflare is sent through admitted Cloudflare-specific SNI proxies. This includes Cachix hosts, but is not limited to a hostname suffix. Only the TCP connection target IP is overridden; the request URL, HTTP `Host`, TLS SNI, and strict certificate verification remain unchanged.
 
-Candidate endpoints come from DoH lookups of the substituter, DoH lookups of `discovery_domains`, configured IP literals, and Cloudflare-specific `sni_proxy_sources`. There is no Fastly region derivation. Every candidate must pass the actual substituter host's TLS and `/nix-cache-info` admission probe. Admitted endpoints are benchmarked through the configured Cloudflare test URL and ordered by estimated download time.
+Candidates come from Cloudflare-specific `sni_proxy_sources` and extra IP literals in `candidates`. Every candidate must pass the actual substituter host's TLS and `/nix-cache-info` admission probe. Admitted proxies are benchmarked through the configured Cloudflare test URL and ordered by estimated download time.
 
-The default `discovery_domains` entry, `cloudflare.182682.xyz`, is a third-party-maintained list of optimized Cloudflare IPs. It is not operated by this project and may change or become unavailable at any time; because every candidate must pass the admission probe anyway, a stale or dead discovery domain merely yields fewer candidates and never affects correctness.
-
-Endpoint requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. All Range requests of a chunked NAR download are pinned to the same endpoint, and the concurrency quota is still shared per logical host — same as `fastly_optimization`. Endpoint status is shown on the dashboard overview page.
+SNI proxy requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. All Range requests of a chunked NAR download are pinned to the same proxy, and the concurrency quota is still shared per logical host — same as `fastly_optimization`. Proxy status is shown on the dashboard overview page.
 
 Enabling this section does not require a particular hostname. If no configured substituter is detected as Cloudflare, this section remains idle and changes no request path.
 
@@ -205,14 +196,7 @@ Whether Cloudflare endpoint optimization is enabled.
 - Type: Array of IP Address
 - Default: `[]`
 
-Additional seed endpoint candidates as IP literals. Domain names are not accepted.
-
-### `cloudflare_optimization.discovery_domains`
-
-- Type: Array of String
-- Default: `["cloudflare.182682.xyz"]`
-
-Third-party domains whose DNS-over-HTTPS answers are used as additional Cloudflare endpoint candidates. Set to `[]` explicitly to disable this source.
+Additional SNI proxy IPs as literals. Domain names are not accepted.
 
 ### `cloudflare_optimization.sni_proxy_sources`
 
@@ -415,5 +399,6 @@ The dashboard exposes the following `POST` endpoints, accepting `application/x-w
 - `/dashboard/substituters` with `url` (required), `priority` (optional, default `40`), and `storage_url` (optional)
 - `/dashboard/substituters/enable` with `url`
 - `/dashboard/substituters/disable` with `url`
+- `/dashboard/sni-proxies` with `url` (the substituter URL) and `ip` (IPv4 or IPv6)
 
-At least one substituter must remain enabled. A substituter added at runtime uses the system DNS path unless its host already has an endpoint manager from startup CDN detection.
+At least one substituter must remain enabled. A substituter added at runtime uses the system DNS path unless its host already has an endpoint manager from startup CDN detection. Runtime SNI proxies can only be added to a substituter whose host was classified as Fastly or Cloudflare at startup and whose platform optimization is enabled.

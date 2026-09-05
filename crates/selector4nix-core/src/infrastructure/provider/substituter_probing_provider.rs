@@ -143,7 +143,6 @@ mod tests {
 
     use super::*;
     use crate::domain::substituter::model::Priority;
-    use crate::infrastructure::dns::doh_resolver::DohResolver;
     use crate::infrastructure::endpoint::manager::EndpointManager;
     use crate::infrastructure::provider::{
         EndpointClientPool, EndpointProbingProvider, SniProxySourceProvider,
@@ -171,10 +170,7 @@ mod tests {
             Url::new(&format!("http://cache.nixos.org:{port}")).unwrap(),
             pool,
             probing,
-            Arc::new(DohResolver::new()),
             user_candidates,
-            false,
-            Vec::new(),
             Vec::new(),
             Arc::new(SniProxySourceProvider::new()),
             None,

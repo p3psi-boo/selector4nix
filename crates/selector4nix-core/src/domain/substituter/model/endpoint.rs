@@ -6,8 +6,8 @@ use tokio::time::Instant;
 /// Cooling period after a transient endpoint failure before it may be probed again.
 pub const ENDPOINT_COOLING_PERIOD: Duration = Duration::from_secs(300);
 
-/// CDN platform whose endpoint candidates, SNI proxies, and bandwidth probe
-/// configuration apply to a substituter. The platform is detected at runtime.
+/// CDN platform whose SNI proxy lists and bandwidth probe configuration
+/// apply to a substituter. The platform is detected at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EndpointOptimizationKind {
     Fastly,
@@ -16,14 +16,10 @@ pub enum EndpointOptimizationKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CandidateSource {
-    /// Resolved via DNS-over-HTTPS at runtime.
-    DnsDoh,
     /// Loaded from a platform-specific local or remote SNI proxy list.
     SniProxy,
-    /// Explicitly listed in the configuration.
+    /// Explicitly listed in the configuration as an extra SNI proxy IP.
     UserConfigured,
-    /// Derived from another candidate via Fastly region patterns.
-    DerivedRegion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +236,7 @@ mod tests {
     fn ep(octet: u8, state: EndpointState) -> SubstituterEndpoint {
         SubstituterEndpoint::new(
             IpAddr::V4(Ipv4Addr::new(151, 101, 1, octet)),
-            CandidateSource::DnsDoh,
+            CandidateSource::SniProxy,
         )
         .with_state(state)
     }

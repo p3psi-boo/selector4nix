@@ -1,7 +1,7 @@
-//! Endpoint discovery, admission probing, failure tracking and selection.
+//! SNI proxy discovery, admission probing, failure tracking and selection.
 
 use std::collections::BTreeSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,8 +15,6 @@ use crate::domain::substituter::model::{
     SubstituterEndpoint, order_for_selection,
 };
 use crate::infrastructure::config::{BandwidthProbeConfiguration, SniProxySourceConfiguration};
-use crate::infrastructure::dns::doh_resolver::DohResolver;
-use crate::infrastructure::fastly::region_derivation::derive_region_candidates;
 use crate::infrastructure::provider::{
     EndpointClientPool, EndpointClientSet, EndpointProbingProvider, ProbeEndpointError,
     SniProxySourceProvider,
@@ -25,14 +23,11 @@ use crate::infrastructure::provider::{
 /// Maximum number of endpoints admission-probed concurrently during refresh.
 const PROBE_CONCURRENCY: usize = 8;
 
-/// Merge candidate IPs from all discovery sources, deduplicated; the first
-/// source (DoH — including discovery domains, then SNI proxy sources, then
-/// user-configured, then derived regions) wins.
+/// Merge SNI proxy list IPs with extra configured IPs, deduplicated; list
+/// entries win over user-configured literals for the same address.
 fn collect_candidates(
-    discovered: &[Ipv4Addr],
     sni_proxies: &[IpAddr],
     user_candidates: &[IpAddr],
-    derive_regions: bool,
 ) -> Vec<(IpAddr, CandidateSource)> {
     fn push(
         ip: IpAddr,
@@ -46,14 +41,6 @@ fn collect_candidates(
     }
     let mut candidates: Vec<(IpAddr, CandidateSource)> = Vec::new();
     let mut seen: BTreeSet<IpAddr> = BTreeSet::new();
-    for ip in discovered {
-        push(
-            IpAddr::V4(*ip),
-            CandidateSource::DnsDoh,
-            &mut candidates,
-            &mut seen,
-        );
-    }
     for ip in sni_proxies {
         push(*ip, CandidateSource::SniProxy, &mut candidates, &mut seen);
     }
@@ -65,44 +52,20 @@ fn collect_candidates(
             &mut seen,
         );
     }
-    if derive_regions {
-        // SNI proxy addresses are relay nodes, not Fastly edge addresses, so
-        // the empirical Fastly region pattern must never be applied to them.
-        let seed: Vec<IpAddr> = candidates
-            .iter()
-            .filter(|(_, source)| *source != CandidateSource::SniProxy)
-            .map(|(ip, _)| *ip)
-            .collect();
-        for ip in seed {
-            if let IpAddr::V4(v4) = ip {
-                for derived in derive_region_candidates(&v4) {
-                    push(
-                        IpAddr::V4(derived),
-                        CandidateSource::DerivedRegion,
-                        &mut candidates,
-                        &mut seen,
-                    );
-                }
-            }
-        }
-    }
     candidates
 }
 
-/// Runtime state of endpoint candidates for a single logical host:
-/// discovery, admission probing, failure tracking and selection ordering.
+/// Runtime state of SNI proxy candidates for a single logical host:
+/// list refresh, admission probing, failure tracking and selection ordering.
 pub struct EndpointManager {
     endpoints: DashMap<IpAddr, SubstituterEndpoint>,
     pool: Arc<EndpointClientPool>,
     probing: Arc<EndpointProbingProvider>,
-    doh: Arc<DohResolver>,
     host: String,
     base_url: Url,
     user_candidates: Vec<IpAddr>,
-    derive_regions: bool,
-    /// Third-party optimization domains whose DoH A records are added to the
-    /// candidates (e.g. a Cloudflare preferred-IP domain); empty for Fastly.
-    discovery_domains: Vec<String>,
+    /// Extra SNI proxy IPs added at runtime; not written back to config.
+    runtime_candidates: Mutex<Vec<IpAddr>>,
     /// Platform-specific local or remote lists of SNI proxy IPs.
     sni_proxy_sources: Vec<SniProxySourceConfiguration>,
     sni_proxy_source_provider: Arc<SniProxySourceProvider>,
@@ -119,10 +82,7 @@ impl EndpointManager {
         base_url: Url,
         pool: Arc<EndpointClientPool>,
         probing: Arc<EndpointProbingProvider>,
-        doh: Arc<DohResolver>,
         user_candidates: Vec<IpAddr>,
-        derive_regions: bool,
-        discovery_domains: Vec<String>,
         sni_proxy_sources: Vec<SniProxySourceConfiguration>,
         sni_proxy_source_provider: Arc<SniProxySourceProvider>,
         bandwidth_probe: Option<BandwidthProbeConfiguration>,
@@ -131,12 +91,10 @@ impl EndpointManager {
             endpoints: DashMap::new(),
             pool,
             probing,
-            doh,
             host,
             base_url,
             user_candidates,
-            derive_regions,
-            discovery_domains,
+            runtime_candidates: Mutex::new(Vec::new()),
             sni_proxy_sources,
             sni_proxy_source_provider,
             bandwidth_probe,
@@ -149,47 +107,99 @@ impl EndpointManager {
         &self.host
     }
 
-    /// Discover candidates (DoH of the host ∪ DoH of discovery domains ∪
-    /// configured ∪ derived), keep existing endpoint states untouched, and
+    fn extra_candidates(&self) -> Vec<IpAddr> {
+        let mut extras = self.user_candidates.clone();
+        let runtime = self
+            .runtime_candidates
+            .lock()
+            .expect("runtime_candidates mutex is not poisoned");
+        for ip in runtime.iter() {
+            if !extras.contains(ip) {
+                extras.push(*ip);
+            }
+        }
+        extras
+    }
+
+    /// Register an extra SNI proxy IP for this host. Returns `false` when the
+    /// address is already a candidate. The caller should then admission-probe.
+    pub fn register_runtime_proxy(&self, ip: IpAddr) -> bool {
+        if self.user_candidates.contains(&ip) || self.endpoints.contains_key(&ip) {
+            return false;
+        }
+        let mut runtime = self
+            .runtime_candidates
+            .lock()
+            .expect("runtime_candidates mutex is not poisoned");
+        if runtime.contains(&ip) {
+            return false;
+        }
+        runtime.push(ip);
+        drop(runtime);
+        self.endpoints
+            .entry(ip)
+            .or_insert_with(|| SubstituterEndpoint::new(ip, CandidateSource::UserConfigured));
+        true
+    }
+
+    /// Register `ip` and admission-probe it immediately so it can be selected
+    /// without waiting for the periodic refresh.
+    pub async fn add_sni_proxy(&self, ip: IpAddr) -> bool {
+        if !self.register_runtime_proxy(ip) {
+            return false;
+        }
+        tracing::info!(host = %self.host, %ip, "added runtime SNI proxy");
+        self.admit_one(ip).await;
+        self.benchmark_endpoints().await;
+        self.update_selected();
+        true
+    }
+
+    async fn admit_one(&self, ip: IpAddr) {
+        let Some(endpoint) = self.endpoints.get(&ip).map(|entry| entry.clone()) else {
+            return;
+        };
+        if endpoint.state() != EndpointState::Pending {
+            return;
+        }
+        let result = self.probing.probe_endpoint(&self.base_url, ip).await;
+        let now = Instant::now();
+        let updated = match result {
+            Ok(latency) => endpoint.on_admission_success(latency),
+            Err(ProbeEndpointError::Certificate { message, .. }) => {
+                tracing::debug!(%ip, %message, "endpoint failed TLS admission");
+                endpoint.on_failure(EndpointFailureKind::Certificate, now)
+            }
+            Err(ProbeEndpointError::Transient { message, .. }) => {
+                tracing::debug!(%ip, %message, "endpoint admission probe failed");
+                endpoint.on_failure(EndpointFailureKind::Transient, now)
+            }
+        };
+        self.endpoints.insert(ip, updated);
+    }
+
+    /// Reload SNI proxy lists, keep existing endpoint states untouched, and
     /// admission-probe all pending endpoints.
     pub async fn refresh(&self) {
-        let mut discovered = self.doh.query_a(&self.host).await;
-        for domain in &self.discovery_domains {
-            let answers = self.doh.query_a(domain).await;
-            if answers.is_empty() {
-                tracing::warn!(
-                    host = %self.host,
-                    domain,
-                    "discovery domain yielded no A records"
-                );
-            }
-            discovered.extend(answers);
-        }
         let mut sni_proxies = Vec::new();
         for source in &self.sni_proxy_sources {
             sni_proxies.extend(self.sni_proxy_source_provider.endpoints(source).await);
         }
-        if discovered.is_empty() && sni_proxies.is_empty() && self.user_candidates.is_empty() {
+        let extras = self.extra_candidates();
+        if sni_proxies.is_empty() && extras.is_empty() {
             tracing::warn!(
                 host = %self.host,
-                "endpoint discovery yielded no candidates; keeping existing endpoints"
+                "SNI proxy discovery yielded no candidates; keeping existing endpoints"
             );
         }
-        let candidates = collect_candidates(
-            &discovered,
-            &sni_proxies,
-            &self.user_candidates,
-            self.derive_regions,
-        );
+        let candidates = collect_candidates(&sni_proxies, &extras);
 
-        // Unlike DNS and explicitly configured candidates, SNI proxy lists
-        // are refreshable inventories. Drop relay nodes that disappeared from
-        // every current source so a local file edit or remote list refresh
-        // takes effect without restarting selector4nix.
+        // SNI proxy lists are refreshable inventories. Drop relays that
+        // disappeared from every current source so a local file edit or remote
+        // list refresh takes effect without restarting selector4nix.
         let current_candidates: BTreeSet<IpAddr> = candidates.iter().map(|(ip, _)| *ip).collect();
-        self.endpoints.retain(|ip, endpoint| {
-            endpoint.source() != CandidateSource::SniProxy || current_candidates.contains(ip)
-        });
+        self.endpoints
+            .retain(|ip, _| current_candidates.contains(ip));
 
         for (ip, source) in &candidates {
             self.endpoints
@@ -418,6 +428,7 @@ impl EndpointManager {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
     use std::num::NonZeroUsize;
 
     use reqwest::Client;
@@ -430,7 +441,7 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(151, 101, 1, octet))
     }
 
-    fn make_manager(user_candidates: Vec<IpAddr>, derive_regions: bool) -> EndpointManager {
+    fn make_manager(user_candidates: Vec<IpAddr>) -> EndpointManager {
         let pool = Arc::new(EndpointClientPool::new(
             "cache.nixos.org".to_string(),
             443,
@@ -452,10 +463,7 @@ mod tests {
             Url::new("https://cache.nixos.org").unwrap(),
             pool,
             probing,
-            Arc::new(DohResolver::new()),
             user_candidates,
-            derive_regions,
-            Vec::new(),
             Vec::new(),
             Arc::new(SniProxySourceProvider::new()),
             None,
@@ -464,142 +472,72 @@ mod tests {
 
     #[test]
     fn candidates_are_merged_deduplicated_and_sourced() {
-        let discovered = vec![Ipv4Addr::new(151, 101, 1, 91)];
-        let user = vec![IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91)), ip(1)];
+        let proxies = vec![ip(91), ip(1)];
+        let user = vec![ip(91), ip(2)];
 
-        let candidates = collect_candidates(&discovered, &[], &user, false);
-
-        assert_eq!(
-            candidates,
-            vec![
-                (
-                    IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91)),
-                    CandidateSource::DnsDoh
-                ),
-                (ip(1), CandidateSource::UserConfigured),
-            ]
-        );
-    }
-
-    #[test]
-    fn discovery_domain_answers_are_merged_with_first_source_winning() {
-        // refresh() concatenates the host's DoH answers with each discovery
-        // domain's answers into `discovered`; collect_candidates then dedups
-        // against user candidates, with the earlier (DoH) source winning.
-        let mut discovered = vec![Ipv4Addr::new(151, 101, 1, 91)];
-        discovered.extend(vec![
-            Ipv4Addr::new(104, 16, 1, 1),
-            Ipv4Addr::new(151, 101, 1, 91),
-        ]);
-        let user = vec![
-            IpAddr::V4(Ipv4Addr::new(104, 16, 1, 1)),
-            IpAddr::V4(Ipv4Addr::new(151, 101, 1, 92)),
-        ];
-
-        let candidates = collect_candidates(&discovered, &[], &user, false);
+        let candidates = collect_candidates(&proxies, &user);
 
         assert_eq!(
             candidates,
             vec![
-                (
-                    IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91)),
-                    CandidateSource::DnsDoh
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(104, 16, 1, 1)),
-                    CandidateSource::DnsDoh
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(151, 101, 1, 92)),
-                    CandidateSource::UserConfigured
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn sni_proxy_candidates_are_merged_after_doh_and_before_configured_ips() {
-        let discovered = vec![Ipv4Addr::new(104, 16, 0, 1)];
-        let external = vec![
-            IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
-        ];
-        let configured = vec![
-            IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
-            IpAddr::V4(Ipv4Addr::new(104, 18, 0, 1)),
-        ];
-
-        let candidates = collect_candidates(&discovered, &external, &configured, false);
-
-        assert_eq!(
-            candidates,
-            vec![
-                (
-                    IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1)),
-                    CandidateSource::DnsDoh,
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(104, 17, 0, 1)),
-                    CandidateSource::SniProxy,
-                ),
-                (
-                    IpAddr::V4(Ipv4Addr::new(104, 18, 0, 1)),
-                    CandidateSource::UserConfigured,
-                ),
+                (ip(91), CandidateSource::SniProxy),
+                (ip(1), CandidateSource::SniProxy),
+                (ip(2), CandidateSource::UserConfigured),
             ]
         );
     }
 
     #[test]
     fn host_returns_the_bound_host() {
-        let manager = make_manager(vec![], false);
+        let manager = make_manager(vec![]);
         assert_eq!(manager.host(), "cache.nixos.org");
     }
 
     #[test]
-    fn region_derivation_appends_derived_candidates_without_duplicates() {
-        let discovered = vec![Ipv4Addr::new(151, 101, 1, 91)];
+    fn register_runtime_proxy_inserts_pending_and_rejects_duplicates() {
+        let manager = make_manager(vec![ip(1)]);
 
-        let candidates = collect_candidates(&discovered, &[], &[], true);
-
-        assert_eq!(candidates[0].1, CandidateSource::DnsDoh);
-        assert!(candidates.len() > 1);
-        assert!(
-            candidates[1..]
-                .iter()
-                .all(|(_, source)| *source == CandidateSource::DerivedRegion)
+        assert!(manager.register_runtime_proxy(ip(2)));
+        assert!(!manager.register_runtime_proxy(ip(2)));
+        assert!(!manager.register_runtime_proxy(ip(1)));
+        assert_eq!(
+            manager.endpoints.get(&ip(2)).unwrap().state(),
+            EndpointState::Pending
         );
-        let ips: Vec<_> = candidates.iter().map(|(ip, _)| *ip).collect();
-        let mut deduped = ips.clone();
-        deduped.dedup();
-        deduped.sort();
-        let mut sorted = ips.clone();
-        sorted.sort();
-        assert_eq!(sorted, deduped);
+        assert_eq!(
+            manager.endpoints.get(&ip(2)).unwrap().source(),
+            CandidateSource::UserConfigured
+        );
     }
 
     #[test]
-    fn region_derivation_does_not_expand_sni_proxy_addresses() {
-        let proxy = IpAddr::V4(Ipv4Addr::new(151, 101, 1, 91));
+    fn extra_candidates_include_runtime_proxies() {
+        let manager = make_manager(vec![ip(1)]);
+        manager.register_runtime_proxy(ip(2));
 
-        let candidates = collect_candidates(&[], &[proxy], &[], true);
+        let extras = manager.extra_candidates();
+        let candidates = collect_candidates(&[], &extras);
 
-        assert_eq!(candidates, vec![(proxy, CandidateSource::SniProxy)]);
+        assert_eq!(
+            candidates,
+            vec![
+                (ip(1), CandidateSource::UserConfigured),
+                (ip(2), CandidateSource::UserConfigured),
+            ]
+        );
     }
 
     #[test]
     fn existing_endpoint_states_are_not_reset_by_candidates() {
-        let manager = make_manager(vec![ip(1), ip(2)], false);
+        let manager = make_manager(vec![ip(1), ip(2)]);
 
-        let now = Instant::now();
         manager.endpoints.insert(
             ip(1),
             SubstituterEndpoint::new(ip(1), CandidateSource::UserConfigured)
                 .on_admission_success(Duration::from_millis(50)),
         );
 
-        // Re-discovering ip(1) must not reset its Usable state; ip(2) is new.
-        for (candidate, source) in collect_candidates(&[], &[], &manager.user_candidates, false) {
+        for (candidate, source) in collect_candidates(&[], &manager.user_candidates) {
             manager
                 .endpoints
                 .entry(candidate)
@@ -614,26 +552,24 @@ mod tests {
             manager.endpoints.get(&ip(2)).unwrap().state(),
             EndpointState::Pending
         );
-        let _ = now;
     }
 
     #[test]
     fn report_failure_transitions_state() {
-        let manager = make_manager(vec![], false);
+        let manager = make_manager(vec![]);
         manager.endpoints.insert(
             ip(1),
-            SubstituterEndpoint::new(ip(1), CandidateSource::DnsDoh)
+            SubstituterEndpoint::new(ip(1), CandidateSource::SniProxy)
                 .on_admission_success(Duration::from_millis(50)),
         );
         manager.endpoints.insert(
             ip(2),
-            SubstituterEndpoint::new(ip(2), CandidateSource::DnsDoh)
+            SubstituterEndpoint::new(ip(2), CandidateSource::SniProxy)
                 .on_admission_success(Duration::from_millis(60)),
         );
 
         manager.report_failure(ip(1), EndpointFailureKind::Transient);
         manager.report_failure(ip(2), EndpointFailureKind::Certificate);
-        // Unknown IPs are ignored.
         manager.report_failure(ip(3), EndpointFailureKind::Transient);
 
         assert!(matches!(
@@ -649,10 +585,10 @@ mod tests {
 
     #[test]
     fn client_for_returns_clients_only_for_known_endpoints() {
-        let manager = make_manager(vec![], false);
+        let manager = make_manager(vec![]);
         manager.endpoints.insert(
             ip(1),
-            SubstituterEndpoint::new(ip(1), CandidateSource::DnsDoh),
+            SubstituterEndpoint::new(ip(1), CandidateSource::SniProxy),
         );
 
         assert!(manager.client_for(ip(1)).is_some());
@@ -661,12 +597,12 @@ mod tests {
 
     #[test]
     fn snapshot_orders_usable_by_latency_then_pending_cooling_incompatible() {
-        let manager = make_manager(vec![], false);
+        let manager = make_manager(vec![]);
         let now = Instant::now();
         let insert = |octet: u8, state: EndpointState| {
             manager.endpoints.insert(
                 ip(octet),
-                SubstituterEndpoint::new(ip(octet), CandidateSource::DnsDoh).with_state(state),
+                SubstituterEndpoint::new(ip(octet), CandidateSource::SniProxy).with_state(state),
             );
         };
         insert(4, EndpointState::Incompatible);
@@ -710,21 +646,19 @@ mod tests {
 
     #[test]
     fn update_selected_tracks_the_first_choice_endpoint() {
-        let manager = make_manager(vec![], false);
+        let manager = make_manager(vec![]);
 
-        // First round: nothing logged, but the selection is recorded.
         manager.update_selected();
         assert_eq!(*manager.last_selected.lock().unwrap(), None);
 
         manager.endpoints.insert(
             ip(1),
-            SubstituterEndpoint::new(ip(1), CandidateSource::DnsDoh)
+            SubstituterEndpoint::new(ip(1), CandidateSource::SniProxy)
                 .on_admission_success(Duration::from_millis(100)),
         );
         manager.update_selected();
         assert_eq!(*manager.last_selected.lock().unwrap(), Some(ip(1)));
 
-        // A failure cools ip(1) down; no usable endpoint remains.
         manager.report_failure(ip(1), EndpointFailureKind::Transient);
         manager.update_selected();
         assert_eq!(*manager.last_selected.lock().unwrap(), None);

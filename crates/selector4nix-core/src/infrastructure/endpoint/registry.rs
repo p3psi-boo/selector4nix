@@ -44,7 +44,6 @@ mod tests {
 
     use super::*;
     use crate::domain::common::url::Url;
-    use crate::infrastructure::dns::doh_resolver::DohResolver;
     use crate::infrastructure::provider::{
         EndpointClientPool, EndpointProbingProvider, SniProxySourceProvider,
     };
@@ -71,10 +70,7 @@ mod tests {
             Url::new(&format!("https://{host}")).unwrap(),
             pool,
             probing,
-            Arc::new(DohResolver::new()),
             Vec::<IpAddr>::new(),
-            false,
-            Vec::new(),
             Vec::new(),
             Arc::new(SniProxySourceProvider::new()),
             None,
