@@ -40,4 +40,12 @@ impl SubstituterService {
         };
         substituter.update_on_probing_finished(probed_state, self.periodic_probing, now)
     }
+
+    pub fn enable(&self, substituter: Substituter) -> (Substituter, Vec<UpdateSubstituterEvent>) {
+        substituter.enable(self.periodic_probing)
+    }
+
+    pub fn disable(&self, substituter: Substituter) -> (Substituter, Vec<UpdateSubstituterEvent>) {
+        substituter.disable()
+    }
 }

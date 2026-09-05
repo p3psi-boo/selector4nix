@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 - Added platform-specific `sni_proxy_sources` to both `fastly_optimization` and `cloudflare_optimization`. Sources may use `file://`, `http://`, or `https://`, contain one IPv4 or IPv6 address per line, and remain strictly separated between Fastly and Cloudflare.
 - Added end-to-end SNI proxy admission: only the TCP destination changes, while the original URL, HTTP Host, TLS SNI, and strict certificate verification remain intact.
 - Added active bounded-download benchmarks for both Fastly and Cloudflare endpoint managers. Newly admitted or stale direct endpoints and SNI proxies are ranked by measured TTFB and throughput; sample bytes are discarded.
+- Added runtime substituter management on the dashboard overview page. Substituters can be added, enabled, and disabled while the process is running, including when the configuration file is read-only. Runtime changes are not written back to the configuration file and are lost on restart. At least one substituter must remain enabled.
 
 ### Removed
 

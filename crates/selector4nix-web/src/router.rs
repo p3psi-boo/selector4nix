@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::Path;
 use axum::response::Redirect;
-use axum::routing::get;
+use axum::routing::{get, post};
 use selector4nix_core::AppContext;
 use selector4nix_core::AppError;
 
@@ -32,6 +32,15 @@ pub fn build_router(ctx: Arc<AppContext>) -> Router {
     let router = router
         .route("/", get(async move || Redirect::permanent("/dashboard/")))
         .route("/dashboard/", get(get_overview_page))
+        .route("/dashboard/substituters", post(post_add_substituter))
+        .route(
+            "/dashboard/substituters/enable",
+            post(post_enable_substituter),
+        )
+        .route(
+            "/dashboard/substituters/disable",
+            post(post_disable_substituter),
+        )
         .route("/dashboard/transferring", get(get_transferring_page))
         .route("/dashboard/cache", get(get_cache_page))
         .route("/dashboard/configuration", get(get_configuration_page))

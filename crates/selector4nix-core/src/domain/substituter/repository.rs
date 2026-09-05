@@ -52,4 +52,8 @@ pub trait SubstituterRepository: Send + Sync {
     async fn exists_available(&self, url: &Url) -> bool;
 
     async fn save(&self, substituter: Substituter);
+
+    /// Inserts `substituter` if no substituter with the same URL exists.
+    /// Returns `true` when inserted, `false` when the URL was already present.
+    async fn create(&self, substituter: Substituter) -> bool;
 }

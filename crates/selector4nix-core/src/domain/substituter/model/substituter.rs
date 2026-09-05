@@ -9,6 +9,8 @@ use crate::domain::substituter::model::{Availability, Priority, SubstituterMeta}
 pub struct Substituter {
     target: SubstituterMeta,
     availability: Availability,
+    #[getset(skip)]
+    enabled: bool,
 }
 
 impl Substituter {
@@ -16,6 +18,7 @@ impl Substituter {
         Self {
             target,
             availability,
+            enabled: true,
         }
     }
 
@@ -29,6 +32,10 @@ impl Substituter {
 
     pub fn prev_failures(&self) -> usize {
         self.availability.prev_failures()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     pub fn is_normal(&self) -> bool {
@@ -46,7 +53,39 @@ impl Substituter {
         )
     }
 
+    /// Whether this substituter may be selected for NAR info or NAR file traffic.
+    pub fn is_selectable(&self) -> bool {
+        self.enabled && !self.is_unavailable()
+    }
+
+    pub fn enable(
+        mut self,
+        periodic_probing: PeriodicProbingOption,
+    ) -> (Self, Vec<UpdateSubstituterEvent>) {
+        if self.enabled {
+            return (self, Vec::new());
+        }
+        self.enabled = true;
+        self.availability = Availability::Normal;
+        let mut events = vec![UpdateSubstituterEvent::NotifyEnabled];
+        if periodic_probing == PeriodicProbingOption::Enabled {
+            events.push(UpdateSubstituterEvent::ScheduleProbing(None));
+        }
+        (self, events)
+    }
+
+    pub fn disable(mut self) -> (Self, Vec<UpdateSubstituterEvent>) {
+        if !self.enabled {
+            return (self, Vec::new());
+        }
+        self.enabled = false;
+        (self, vec![UpdateSubstituterEvent::NotifyDisabled])
+    }
+
     pub fn update_on_service_successful(mut self) -> (Self, Vec<UpdateSubstituterEvent>) {
+        if !self.enabled {
+            return (self, Vec::new());
+        }
         self.availability = self.availability.try_change_to_normal();
         let events = if !self.is_unavailable() {
             vec![UpdateSubstituterEvent::NotifyAvailable]
@@ -60,7 +99,7 @@ impl Substituter {
         mut self,
         now: Instant,
     ) -> (Substituter, Vec<UpdateSubstituterEvent>) {
-        if self.is_unavailable() {
+        if !self.enabled || self.is_unavailable() {
             (self, Vec::new())
         } else {
             self.availability = self.availability.try_change_to_offline(now);
@@ -77,7 +116,7 @@ impl Substituter {
         mut self,
         now: Instant,
     ) -> (Substituter, Vec<UpdateSubstituterEvent>) {
-        if self.is_unavailable() {
+        if !self.enabled || self.is_unavailable() {
             (self, Vec::new())
         } else {
             self.availability = self.availability.try_change_to_service_error(now);
@@ -91,6 +130,9 @@ impl Substituter {
     }
 
     pub fn update_on_next_retry_ready(mut self) -> (Substituter, Vec<UpdateSubstituterEvent>) {
+        if !self.enabled {
+            return (self, Vec::new());
+        }
         self.availability = self.availability.try_change_to_maybe_ready();
         let events = vec![UpdateSubstituterEvent::ScheduleProbing(None)];
         (self, events)
@@ -102,6 +144,9 @@ impl Substituter {
         periodic_probing: PeriodicProbingOption,
         now: Instant,
     ) -> (Substituter, Vec<UpdateSubstituterEvent>) {
+        if !self.enabled {
+            return (self, Vec::new());
+        }
         match probed_state {
             ProbedState::Normal => {
                 if self.is_unavailable() {
@@ -134,6 +179,8 @@ pub enum UpdateSubstituterEvent {
     ScheduleProbing(Option<Instant>),
     NotifyUnavailable,
     NotifyAvailable,
+    NotifyEnabled,
+    NotifyDisabled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -318,5 +365,104 @@ mod tests {
                 UpdateSubstituterEvent::ScheduleRetryReady(now + Duration::from_millis(4000)),
             ],
         );
+    }
+
+    #[test]
+    fn new_substituter_is_enabled_and_selectable() {
+        let substituter = make_substituter(Availability::Normal);
+        assert!(substituter.is_enabled());
+        assert!(substituter.is_selectable());
+    }
+
+    #[test]
+    fn disable_removes_selectability_and_emits_event() {
+        let substituter = make_substituter(Availability::Normal);
+        let (result, events) = substituter.disable();
+
+        assert!(!result.is_enabled());
+        assert!(!result.is_selectable());
+        assert!(result.is_normal());
+        assert_events_eq(events, vec![UpdateSubstituterEvent::NotifyDisabled]);
+    }
+
+    #[test]
+    fn disable_is_idempotent() {
+        let substituter = make_substituter(Availability::Normal);
+        let (substituter, _) = substituter.disable();
+        let (result, events) = substituter.disable();
+
+        assert!(!result.is_enabled());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn enable_restores_normal_availability() {
+        let substituter = make_substituter(Availability::Offline {
+            detected_at: Instant::now(),
+        });
+        let (substituter, _) = substituter.disable();
+        let (result, events) = substituter.enable(PeriodicProbingOption::None);
+
+        assert!(result.is_enabled());
+        assert!(result.is_normal());
+        assert!(result.is_selectable());
+        assert_events_eq(events, vec![UpdateSubstituterEvent::NotifyEnabled]);
+    }
+
+    #[test]
+    fn enable_schedules_probing_when_periodic_probing_is_enabled() {
+        let substituter = make_substituter(Availability::Normal);
+        let (substituter, _) = substituter.disable();
+        let (result, events) = substituter.enable(PeriodicProbingOption::Enabled);
+
+        assert!(result.is_selectable());
+        assert_events_eq(
+            events,
+            vec![
+                UpdateSubstituterEvent::NotifyEnabled,
+                UpdateSubstituterEvent::ScheduleProbing(None),
+            ],
+        );
+    }
+
+    #[test]
+    fn enable_is_idempotent() {
+        let substituter = make_substituter(Availability::Normal);
+        let (result, events) = substituter.enable(PeriodicProbingOption::Enabled);
+
+        assert!(result.is_enabled());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn disabled_substituter_ignores_health_updates() {
+        let substituter = make_substituter(Availability::Normal);
+        let (substituter, _) = substituter.disable();
+        let now = Instant::now();
+
+        let (after_success, success_events) = substituter.clone().update_on_service_successful();
+        let (after_error, error_events) = substituter.clone().update_on_service_error(now);
+        let (after_probe, probe_events) = substituter.update_on_probing_finished(
+            ProbedState::Normal,
+            PeriodicProbingOption::Enabled,
+            now,
+        );
+
+        assert!(!after_success.is_enabled());
+        assert!(after_success.is_normal());
+        assert!(success_events.is_empty());
+        assert!(error_events.is_empty());
+        assert!(!after_error.is_unavailable());
+        assert!(probe_events.is_empty());
+        assert!(!after_probe.is_unavailable());
+    }
+
+    #[test]
+    fn offline_substituter_is_not_selectable_even_when_enabled() {
+        let substituter = make_substituter(Availability::Offline {
+            detected_at: Instant::now(),
+        });
+        assert!(substituter.is_enabled());
+        assert!(!substituter.is_selectable());
     }
 }

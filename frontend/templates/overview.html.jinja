@@ -1,119 +1,234 @@
 {% extends "base.html.jinja" %}
 
 {% block content %}
-  <div id="overview" class="space-y-8" hx-get="/dashboard/" hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML">
-    <section>
-      <h2 class="mb-3 font-semibold">Summary</h2>
+  <div class="space-y-8">
+    <div
+      id="overview"
+      class="space-y-8"
+      hx-get="/dashboard/"
+      hx-trigger="every 5s"
+      hx-target="this"
+      hx-swap="outerHTML"
+      hx-select="#overview"
+    >
+      {% if error %}
+        <div class="rounded-card border border-danger bg-danger-subtle px-4 py-3 text-sm text-danger">{{ error }}</div>
+      {% endif %}
 
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">Substituters</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            <span class="text-xl font-semibold">{{ model.summary.available_substituters }}</span>
-            <span class="text-sm text-muted">/ {{ model.summary.total_substituters }} available</span>
+      <section>
+        <h2 class="mb-3 font-semibold">Summary</h2>
+
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
+          <div class="rounded-card border border-line bg-surface p-4">
+            <h3 class="text-sm font-medium">Substituters</h3>
+            <div class="mt-2 flex items-baseline gap-1.5">
+              <span class="text-xl font-semibold">{{ model.summary.available_substituters }}</span>
+              <span class="text-sm text-muted">/ {{ model.summary.total_substituters }} available</span>
+            </div>
+          </div>
+
+          <div class="rounded-card border border-line bg-surface p-4">
+            <h3 class="text-sm font-medium">Transferring</h3>
+            <div class="mt-2 flex items-baseline gap-1.5">
+              <span class="text-xl font-semibold">{{ model.summary.transferring_nar_files }}</span>
+              <span class="text-sm text-muted">in progress</span>
+            </div>
+          </div>
+
+          <div class="rounded-card border border-line bg-surface p-4">
+            <h3 class="text-sm font-medium">NAR info cache</h3>
+            <div class="mt-2 flex items-baseline gap-1.5">
+              <span class="text-xl font-semibold">{{ model.summary.nar_info_cache_size }}</span>
+              <span class="text-sm text-muted">/ {{ model.summary.nar_info_cache_capacity }}</span>
+            </div>
+          </div>
+
+          <div class="rounded-card border border-line bg-surface p-4">
+            <h3 class="text-sm font-medium">Cache mode</h3>
+            <div class="mt-2 flex items-baseline gap-1.5">
+              <span class="text-xl font-semibold">
+                {{ "In-memory" if model.summary.cache_mode == "InMemory" else "Persistent" }}
+              </span>
+            </div>
           </div>
         </div>
+      </section>
 
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">Transferring</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            <span class="text-xl font-semibold">{{ model.summary.transferring_nar_files }}</span>
-            <span class="text-sm text-muted">in progress</span>
-          </div>
-        </div>
+      <section>
+        <h2 class="mb-3 font-semibold">Substituters</h2>
 
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">NAR info cache</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            <span class="text-xl font-semibold">{{ model.summary.nar_info_cache_size }}</span>
-            <span class="text-sm text-muted">/ {{ model.summary.nar_info_cache_capacity }}</span>
-          </div>
-        </div>
-
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">Cache mode</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            <span class="text-xl font-semibold">
-              {{ "In-memory" if model.summary.cache_mode == "InMemory" else "Persistent" }}
-            </span>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section>
-      <h2 class="mb-3 font-semibold">Substituters</h2>
-
-      <div class="overflow-x-auto rounded-card border border-line bg-surface">
-        <table class="w-full">
-          <thead>
-            <tr class="border-b border-line bg-canvas/50 text-left">
-              <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                <span class="text-sm font-medium text-muted">URL</span>
-              </th>
-              <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                <span class="text-sm font-medium text-muted">Priority</span>
-              </th>
-              <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                <span class="text-sm font-medium text-muted">Authentication</span>
-              </th>
-              <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                <span class="text-sm font-medium text-muted">Status</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-line-soft">
-            {% for substituter in model.substituters %}
-              <tr class="transition-colors hover:bg-canvas/50">
-                <td class="flex flex-col gap-px px-4 py-3 whitespace-nowrap">
-                  <span class="font-mono text-sm">{{ substituter.url }}</span>
-                  <span class="font-mono text-xs text-muted">{{ substituter.storage_url }}</span>
-                </td>
-                <td class="px-4 py-3 whitespace-nowrap">
-                  <span class="text-sm text-muted tabular-nums">{{ substituter.priority }}</span>
-                </td>
-                <td class="px-4 py-3 whitespace-nowrap">
-                  <span class="text-sm text-muted">
-                    {{ "Authenticated" if substituter.has_credential else "Public" }}
-                  </span>
-                </td>
-                <td class="px-4 py-3 whitespace-nowrap">
-                  {% if substituter.status == "Normal" %}
-                    <span class="text-sm text-success">Normal</span>
-                  {% elif substituter.status == "MaybeReady" %}
-                    <span class="text-sm text-warn">Maybe ready</span>
-                  {% elif substituter.status == "Offline" %}
-                    <span class="text-sm text-danger">Offline</span>
-                  {% else %}
-                    <span class="text-sm text-danger">Service error</span>
-                  {% endif %}
-                </td>
+        <div class="overflow-x-auto rounded-card border border-line bg-surface">
+          <table class="w-full">
+            <thead>
+              <tr class="border-b border-line bg-canvas/50 text-left">
+                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
+                  <span class="text-sm font-medium text-muted">URL</span>
+                </th>
+                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
+                  <span class="text-sm font-medium text-muted">Priority</span>
+                </th>
+                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
+                  <span class="text-sm font-medium text-muted">Authentication</span>
+                </th>
+                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
+                  <span class="text-sm font-medium text-muted">Status</span>
+                </th>
+                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
+                  <span class="text-sm font-medium text-muted">Actions</span>
+                </th>
               </tr>
-              {% for endpoint in substituter.endpoints %}
+            </thead>
+            <tbody class="divide-y divide-line-soft">
+              {% for substituter in model.substituters %}
                 <tr class="transition-colors hover:bg-canvas/50">
-                  <td class="flex flex-col gap-px px-4 py-2 pl-8 whitespace-nowrap">
-                    <span class="font-mono text-sm text-muted tabular-nums">
-                      {{ endpoint.ip }} · {{ endpoint.source }} ·
-                      {% if endpoint.status is startingwith("Usable") %}
-                        <span class="text-success">{{ endpoint.status }}</span>
-                      {% elif endpoint.status == "Incompatible" %}
-                        <span class="text-danger">{{ endpoint.status }}</span>
-                      {% elif endpoint.status == "Cooling" %}
-                        <span class="text-warn">{{ endpoint.status }}</span>
-                      {% else %}
-                        <span class="text-muted">{{ endpoint.status }}</span>
-                      {% endif %}
+                  <td class="flex flex-col gap-px px-4 py-3 whitespace-nowrap">
+                    <span class="font-mono text-sm">{{ substituter.url }}</span>
+                    <span class="font-mono text-xs text-muted">{{ substituter.storage_url }}</span>
+                  </td>
+                  <td class="px-4 py-3 whitespace-nowrap">
+                    <span class="text-sm text-muted tabular-nums">{{ substituter.priority }}</span>
+                  </td>
+                  <td class="px-4 py-3 whitespace-nowrap">
+                    <span class="text-sm text-muted">
+                      {{ "Authenticated" if substituter.has_credential else "Public" }}
                     </span>
                   </td>
-                  <td class="px-4 py-2 whitespace-nowrap"></td>
-                  <td class="px-4 py-2 whitespace-nowrap"></td>
-                  <td class="px-4 py-2 whitespace-nowrap"></td>
+                  <td class="px-4 py-3 whitespace-nowrap">
+                    {% if substituter.status == "Normal" %}
+                      <span class="text-sm text-success">Normal</span>
+                    {% elif substituter.status == "MaybeReady" %}
+                      <span class="text-sm text-warn">Maybe ready</span>
+                    {% elif substituter.status == "Disabled" %}
+                      <span class="text-sm text-muted">Disabled</span>
+                    {% elif substituter.status == "Offline" %}
+                      <span class="text-sm text-danger">Offline</span>
+                    {% else %}
+                      <span class="text-sm text-danger">Service error</span>
+                    {% endif %}
+                  </td>
+                  <td class="px-4 py-3 whitespace-nowrap">
+                    {% if substituter.status == "Disabled" %}
+                      <form
+                        method="post"
+                        action="/dashboard/substituters/enable"
+                        hx-post="/dashboard/substituters/enable"
+                        hx-target="#overview"
+                        hx-select="#overview"
+                        hx-swap="outerHTML"
+                      >
+                        <input type="hidden" name="url" value="{{ substituter.url }}" />
+                        <button
+                          type="submit"
+                          class="inline-flex items-center rounded px-3 py-1.5 text-sm font-medium transition-colors hover:bg-canvas"
+                        >
+                          Enable
+                        </button>
+                      </form>
+                    {% else %}
+                      <form
+                        method="post"
+                        action="/dashboard/substituters/disable"
+                        hx-post="/dashboard/substituters/disable"
+                        hx-target="#overview"
+                        hx-select="#overview"
+                        hx-swap="outerHTML"
+                      >
+                        <input type="hidden" name="url" value="{{ substituter.url }}" />
+                        <button
+                          type="submit"
+                          class="inline-flex items-center rounded px-3 py-1.5 text-sm font-medium text-danger transition-colors hover:bg-danger-subtle"
+                        >
+                          Disable
+                        </button>
+                      </form>
+                    {% endif %}
+                  </td>
                 </tr>
+                {% for endpoint in substituter.endpoints %}
+                  <tr class="transition-colors hover:bg-canvas/50">
+                    <td class="flex flex-col gap-px px-4 py-2 pl-8 whitespace-nowrap">
+                      <span class="font-mono text-sm text-muted tabular-nums">
+                        {{ endpoint.ip }} · {{ endpoint.source }} ·
+                        {% if endpoint.status is startingwith("Usable") %}
+                          <span class="text-success">{{ endpoint.status }}</span>
+                        {% elif endpoint.status == "Incompatible" %}
+                          <span class="text-danger">{{ endpoint.status }}</span>
+                        {% elif endpoint.status == "Cooling" %}
+                          <span class="text-warn">{{ endpoint.status }}</span>
+                        {% else %}
+                          <span class="text-muted">{{ endpoint.status }}</span>
+                        {% endif %}
+                      </span>
+                    </td>
+                    <td class="px-4 py-2 whitespace-nowrap"></td>
+                    <td class="px-4 py-2 whitespace-nowrap"></td>
+                    <td class="px-4 py-2 whitespace-nowrap"></td>
+                    <td class="px-4 py-2 whitespace-nowrap"></td>
+                  </tr>
+                {% endfor %}
               {% endfor %}
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section>
+      <h2 class="mb-3 font-semibold">Add substituter</h2>
+      <p class="mb-3 text-sm text-muted">
+        Runtime changes apply immediately and are not written back to the configuration file. They are lost when the
+        process restarts.
+      </p>
+
+      <form
+        class="rounded-card border border-line bg-surface p-4"
+        method="post"
+        action="/dashboard/substituters"
+        hx-post="/dashboard/substituters"
+        hx-target="#overview"
+        hx-select="#overview"
+        hx-swap="outerHTML"
+        hx-on::after-request="if (event.detail.xhr.getResponseHeader('HX-Trigger') === 'substituter-added') this.reset()"
+      >
+        <div class="flex flex-col gap-3 md:flex-row md:items-end">
+          <label class="flex min-w-0 flex-1 flex-col gap-1">
+            <span class="text-sm font-medium">URL</span>
+            <input
+              type="url"
+              name="url"
+              required
+              placeholder="https://cache.nixos.org/"
+              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
+            />
+          </label>
+          <label class="flex w-full flex-col gap-1 md:w-28">
+            <span class="text-sm font-medium">Priority</span>
+            <input
+              type="number"
+              name="priority"
+              min="1"
+              step="1"
+              placeholder="40"
+              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm tabular-nums"
+            />
+          </label>
+          <label class="flex min-w-0 flex-1 flex-col gap-1">
+            <span class="text-sm font-medium">Storage URL</span>
+            <input
+              type="url"
+              name="storage_url"
+              placeholder="optional"
+              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
+            />
+          </label>
+          <button
+            type="submit"
+            class="inline-flex items-center justify-center rounded bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg transition-colors hover:bg-accent/90"
+          >
+            Add
+          </button>
+        </div>
+      </form>
     </section>
   </div>
 {% endblock %}

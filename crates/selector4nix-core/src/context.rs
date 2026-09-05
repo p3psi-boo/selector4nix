@@ -5,6 +5,9 @@ use crate::application::usecase::dashboard::{
 use crate::application::usecase::derivation::GetDerivationLogUseCase;
 use crate::application::usecase::nar_file::StreamNarFileUseCase;
 use crate::application::usecase::nar_info::{ListNarInnerDirectoryUseCase, ResolveNarInfoUseCase};
+use crate::application::usecase::substituter::{
+    AddSubstituterUseCase, DisableSubstituterUseCase, EnableSubstituterUseCase,
+};
 use crate::infrastructure::config::CacheInfoConfiguration;
 
 pub struct AppContext {
@@ -16,5 +19,8 @@ pub struct AppContext {
     pub get_dashboard_transferring_usecase: GetDashboardTransferringUseCase,
     pub get_dashboard_cache_stats_usecase: GetDashboardCacheStatsUseCase,
     pub get_dashboard_config_summary_usecase: GetDashboardConfigSummaryUseCase,
+    pub add_substituter_usecase: AddSubstituterUseCase,
+    pub enable_substituter_usecase: EnableSubstituterUseCase,
+    pub disable_substituter_usecase: DisableSubstituterUseCase,
     pub cache_info: CacheInfoConfiguration,
 }

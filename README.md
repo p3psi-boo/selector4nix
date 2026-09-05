@@ -13,6 +13,7 @@ A Nix substituter proxy with parallel cache queries and latency-aware selection.
 - Automatically detects and skips unavailable substituters, retrying them with exponential backoff
 - Automatically classifies Cloudflare/Fastly substituters and benchmarks their platform-specific SNI proxies
 - Continuously probes substituters to detect failures early and verify recovery
+- Allows adding, enabling, and disabling substituters at runtime from the dashboard, even when the configuration file is read-only
 - Proxy private cache substituters with additional credentials
 - Pre-fetch multiple NAR file chunks concurrently to improve network utilization, based on sliding window
 

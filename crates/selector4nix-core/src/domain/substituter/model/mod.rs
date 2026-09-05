@@ -71,4 +71,8 @@ pub mod test_support {
             Availability::MaybeReady { prev_failures: 0 },
         )
     }
+
+    pub fn make_substituter_disabled_with_url(url: &Url) -> Substituter {
+        make_substituter_normal_with_url(url).disable().0
+    }
 }

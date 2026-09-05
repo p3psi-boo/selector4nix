@@ -7,7 +7,6 @@ use anyhow::{Context, Result as AnyhowResult};
 use redb::Database;
 use redb::backends::InMemoryBackend;
 use reqwest::{Client, ClientBuilder};
-use selector4nix_actor::actor::Address;
 use selector4nix_actor::registry::{
     AsyncFactory, CapacityOption, ExpirationOption, RegistryBuilder,
 };
@@ -26,7 +25,11 @@ use selector4nix_core::application::usecase::nar_file::StreamNarFileUseCase;
 use selector4nix_core::application::usecase::nar_info::{
     ListNarInnerDirectoryUseCase, ResolveNarInfoUseCase,
 };
+use selector4nix_core::application::usecase::substituter::{
+    AddSubstituterUseCase, DisableSubstituterUseCase, EnableSubstituterUseCase,
+};
 use selector4nix_core::domain::common::passthrough_headers::SELF_USER_AGENT;
+use selector4nix_core::domain::common::url::Url;
 use selector4nix_core::domain::nar_file::NarFileService;
 use selector4nix_core::domain::nar_file::model::NarFileKey;
 use selector4nix_core::domain::nar_info::model::StorePathHash;
@@ -452,23 +455,30 @@ pub async fn init_context(
 
     let substituter_registry = Arc::new({
         let registry = RegistryBuilder::new()
-            .factory(AsyncFactory::new(|_| async {
-                // No additional actor will be loaded here as those actors are created eagerly
-                Address::mock().0
+            .factory(AsyncFactory::new({
+                let substituter_service = substituter_service.clone();
+                let substituter_probing_provider = substituter_probing_provider.clone();
+                let substituter_repository = substituter_repository.clone();
+                move |url: &Url| {
+                    let substituter_service = substituter_service.clone();
+                    let substituter_probing_provider = substituter_probing_provider.clone();
+                    let substituter_repository = substituter_repository.clone();
+                    let url = url.clone();
+                    async move {
+                        let init = substituter_repository.get(&url).await;
+                        SubstituterActor::new(
+                            init,
+                            substituter_service,
+                            substituter_probing_provider,
+                            substituter_repository,
+                        )
+                        .run()
+                    }
+                }
             }))
             .build();
         for sub in &substituters {
-            let substituter_service = substituter_service.clone();
-            let sub_probing_provider = substituter_probing_provider.clone();
-            let repo = substituter_repository.clone();
-            let addr = SubstituterActor::new(
-                Some(sub.clone()),
-                substituter_service,
-                sub_probing_provider,
-                repo,
-            )
-            .run();
-            registry.insert(sub.url().clone(), addr).await;
+            let _ = registry.get(sub.url()).await;
         }
         registry
     });
@@ -542,6 +552,15 @@ pub async fn init_context(
         nar_transfer_metric.clone(),
     );
 
+    let add_substituter_usecase =
+        AddSubstituterUseCase::new(substituter_repository.clone(), substituter_registry.clone());
+    let enable_substituter_usecase =
+        EnableSubstituterUseCase::new(substituter_repository.clone(), substituter_registry.clone());
+    let disable_substituter_usecase = DisableSubstituterUseCase::new(
+        substituter_repository.clone(),
+        substituter_registry.clone(),
+    );
+
     let get_dashboard_overview_usecase = GetDashboardOverviewUseCase::new(
         substituter_repository,
         nar_info_registry.clone(),
@@ -576,6 +595,9 @@ pub async fn init_context(
         get_dashboard_transferring_usecase,
         get_dashboard_cache_stats_usecase,
         get_dashboard_config_summary_usecase,
+        add_substituter_usecase,
+        enable_substituter_usecase,
+        disable_substituter_usecase,
         cache_info: config.cache_info.clone(),
     }))
 }

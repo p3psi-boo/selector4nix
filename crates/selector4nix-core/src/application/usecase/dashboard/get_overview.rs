@@ -59,6 +59,7 @@ pub enum SubstituterStatus {
     Offline,
     ServiceError,
     MaybeReady,
+    Disabled,
 }
 
 pub struct GetDashboardOverviewUseCase {
@@ -100,7 +101,7 @@ impl GetDashboardOverviewUseCase {
         let substituters = self.substituter_repository.query_all().await;
 
         let summary = OverviewSummaryData {
-            available_substituters: substituters.iter().filter(|s| !s.is_unavailable()).count(),
+            available_substituters: substituters.iter().filter(|s| s.is_selectable()).count(),
             total_substituters: substituters.len(),
             transferring_nar_files: self.nar_transfer_metric.transferring_count(),
             nar_info_cache_size: self.nar_info_registry.entry_count().await,
@@ -115,11 +116,15 @@ impl GetDashboardOverviewUseCase {
                 storage_url: s.target().storage_url().clone(),
                 priority: s.priority(),
                 has_credential: self.credentials.lookup(s.url()).is_some(),
-                status: match s.availability() {
-                    Availability::Normal => SubstituterStatus::Normal,
-                    Availability::Offline { .. } => SubstituterStatus::Offline,
-                    Availability::ServiceError { .. } => SubstituterStatus::ServiceError,
-                    Availability::MaybeReady { .. } => SubstituterStatus::MaybeReady,
+                status: if !s.is_enabled() {
+                    SubstituterStatus::Disabled
+                } else {
+                    match s.availability() {
+                        Availability::Normal => SubstituterStatus::Normal,
+                        Availability::Offline { .. } => SubstituterStatus::Offline,
+                        Availability::ServiceError { .. } => SubstituterStatus::ServiceError,
+                        Availability::MaybeReady { .. } => SubstituterStatus::MaybeReady,
+                    }
                 },
                 endpoints: self.endpoints_for(s.url()),
             })

@@ -23,41 +23,15 @@ impl InMemorySubstituterRepository {
             write_permit: Semaphore::new(1),
         }
     }
-}
 
-#[async_trait]
-impl SubstituterRepository for InMemorySubstituterRepository {
-    async fn get(&self, url: &Url) -> Option<Substituter> {
-        self.substituters.get(url).map(|s| s.clone())
-    }
-
-    async fn query_all(&self) -> Vec<Substituter> {
-        self.substituters
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect()
-    }
-
-    async fn query_all_available(&self) -> Arc<Vec<SubstituterCandidate>> {
-        self.available_substituters.load_full()
-    }
-
-    async fn exists_available(&self, url: &Url) -> bool {
-        self.substituters
-            .get(url)
-            .is_some_and(|s| !s.is_unavailable())
-    }
-
-    async fn save(&self, substituter: Substituter) {
-        let _permit = self.write_permit.acquire().await;
-
+    fn save_locked(&self, substituter: Substituter) {
         let substituter = self
             .substituters
             .entry(substituter.url().clone())
             .insert(substituter)
             .downgrade();
 
-        if substituter.is_unavailable() {
+        if !substituter.is_selectable() {
             let avail = self.available_substituters.load_full();
             if let Some(index) = avail.iter().position(|s| s.url() == substituter.url()) {
                 let mut avail = (*avail).clone();
@@ -80,13 +54,51 @@ impl SubstituterRepository for InMemorySubstituterRepository {
     }
 }
 
+#[async_trait]
+impl SubstituterRepository for InMemorySubstituterRepository {
+    async fn get(&self, url: &Url) -> Option<Substituter> {
+        self.substituters.get(url).map(|s| s.clone())
+    }
+
+    async fn query_all(&self) -> Vec<Substituter> {
+        self.substituters
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    async fn query_all_available(&self) -> Arc<Vec<SubstituterCandidate>> {
+        self.available_substituters.load_full()
+    }
+
+    async fn exists_available(&self, url: &Url) -> bool {
+        self.substituters
+            .get(url)
+            .is_some_and(|s| s.is_selectable())
+    }
+
+    async fn save(&self, substituter: Substituter) {
+        let _permit = self.write_permit.acquire().await;
+        self.save_locked(substituter);
+    }
+
+    async fn create(&self, substituter: Substituter) -> bool {
+        let _permit = self.write_permit.acquire().await;
+        if self.substituters.contains_key(substituter.url()) {
+            return false;
+        }
+        self.save_locked(substituter);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::domain::common::url::Url;
     use crate::domain::substituter::SubstituterRepository;
     use crate::domain::substituter::model::test_support::{
-        make_substituter_maybe_ready_with_url, make_substituter_normal_with_url,
-        make_substituter_offline_with_url,
+        make_substituter_disabled_with_url, make_substituter_maybe_ready_with_url,
+        make_substituter_normal_with_url, make_substituter_offline_with_url,
     };
 
     use super::*;
@@ -204,5 +216,41 @@ mod tests {
 
         let avail = repo.query_all_available().await;
         assert_eq!(avail.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn save_disabled_removes_from_snapshot() {
+        let repo = InMemorySubstituterRepository::new();
+        let url = Url::new("https://a.example.com").unwrap();
+        repo.save(make_substituter_normal_with_url(&url)).await;
+        repo.save(make_substituter_disabled_with_url(&url)).await;
+
+        let avail = repo.query_all_available().await;
+        assert!(avail.is_empty());
+        assert!(repo.get(&url).await.is_some());
+        assert!(!repo.exists_available(&url).await);
+    }
+
+    #[tokio::test]
+    async fn create_inserts_when_absent() {
+        let repo = InMemorySubstituterRepository::new();
+        let url = Url::new("https://a.example.com").unwrap();
+        let inserted = repo.create(make_substituter_normal_with_url(&url)).await;
+
+        assert!(inserted);
+        assert_eq!(repo.query_all().await.len(), 1);
+        assert_eq!(repo.query_all_available().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_url() {
+        let repo = InMemorySubstituterRepository::new();
+        let url = Url::new("https://a.example.com").unwrap();
+        repo.create(make_substituter_normal_with_url(&url)).await;
+        let inserted = repo.create(make_substituter_disabled_with_url(&url)).await;
+
+        assert!(!inserted);
+        let stored = repo.get(&url).await.unwrap();
+        assert!(stored.is_enabled());
     }
 }

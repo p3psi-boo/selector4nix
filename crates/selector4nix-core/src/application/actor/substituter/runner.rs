@@ -2,17 +2,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use selector4nix_actor::actor::{Actor, ActorPre, ActorPreBuilder, Context};
+use tokio::sync::oneshot::Sender as OneshotSender;
 use tokio::time::Instant;
 
 use crate::domain::substituter::model::{Substituter, UpdateSubstituterEvent};
 use crate::domain::substituter::port::{ProbeSubstituterError, SubstituterProbingProvider};
 use crate::domain::substituter::{SubstituterRepository, SubstituterService};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug)]
 pub enum SubstituterRequest {
     ServiceSuccessful,
     ServiceOffline,
     ServiceError,
+    Enable { reply_to: OneshotSender<()> },
+    Disable { reply_to: OneshotSender<()> },
 }
 
 pub enum SubstituterInternal {
@@ -83,6 +86,9 @@ impl SubstituterActor {
                 tracing::debug!(url = %substituter.target().url(), "substituter became or stayed available after probing");
                 self.substituter_repository.save(substituter.clone()).await;
             }
+            UpdateSubstituterEvent::NotifyEnabled | UpdateSubstituterEvent::NotifyDisabled => {
+                self.substituter_repository.save(substituter.clone()).await;
+            }
         }
     }
 }
@@ -99,8 +105,11 @@ impl Actor for SubstituterActor {
     async fn on_start(&mut self) -> Option<Self::State> {
         match self.init.take() {
             Some(init) => {
-                let now = Instant::now();
-                let events = self.substituter_service.on_initial(now);
+                let events = if init.is_enabled() {
+                    self.substituter_service.on_initial(Instant::now())
+                } else {
+                    Vec::new()
+                };
                 self.exec_all_events(&init, events).await;
                 Some(init)
             }
@@ -129,6 +138,18 @@ impl Actor for SubstituterActor {
                 let now = Instant::now();
                 let (substituter, events) = substituter.update_on_service_error(now);
                 self.exec_all_events(&substituter, events).await;
+                Some(substituter)
+            }
+            SubstituterRequest::Enable { reply_to } => {
+                let (substituter, events) = self.substituter_service.enable(substituter);
+                self.exec_all_events(&substituter, events).await;
+                let _ = reply_to.send(());
+                Some(substituter)
+            }
+            SubstituterRequest::Disable { reply_to } => {
+                let (substituter, events) = self.substituter_service.disable(substituter);
+                self.exec_all_events(&substituter, events).await;
+                let _ = reply_to.send(());
                 Some(substituter)
             }
         }

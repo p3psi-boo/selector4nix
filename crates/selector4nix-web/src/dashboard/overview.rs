@@ -11,12 +11,20 @@ pub async fn get_overview_page(
     State(ctx): State<Arc<AppContext>>,
     headers: HeaderMap,
 ) -> Html<String> {
+    render_overview_page(&ctx, &headers, None).await
+}
+
+pub async fn render_overview_page(
+    ctx: &AppContext,
+    headers: &HeaderMap,
+    error: Option<String>,
+) -> Html<String> {
     let model = ctx.get_dashboard_overview_usecase.run().await;
 
     let environment = VIEW_ENVIRONMENT.acquire_env().unwrap();
     let view = environment.get_template("overview.html.jinja").unwrap();
 
-    let model = minijinja::context! { model };
+    let model = minijinja::context! { model, error };
     let rendered = if headers.contains_key("hx-request") && !headers.contains_key("hx-boosted") {
         view.render_captured(model)
             .and_then(|mut v| v.with_state_mut(|state| state.render_block("content")))
