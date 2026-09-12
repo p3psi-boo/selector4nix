@@ -558,6 +558,7 @@ pub async fn init_context(
         endpoint_managers,
         config.cache.nar_info_cache_capacity,
         has_persistent_cache,
+        config.clone(),
     );
 
     let get_dashboard_transferring_usecase =
