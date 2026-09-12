@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,8 +12,8 @@ use tokio::time::Instant;
 
 use crate::domain::common::url::Url;
 use crate::domain::substituter::model::{
-    CandidateSource, EndpointFailureKind, EndpointSnapshot, EndpointSnapshotStatus, EndpointState,
-    SubstituterEndpoint, order_for_selection,
+    BandwidthMeasurement, CandidateSource, EndpointFailureKind, EndpointSnapshot,
+    EndpointSnapshotStatus, EndpointState, SubstituterEndpoint, order_for_selection,
 };
 use crate::infrastructure::config::{BandwidthProbeConfiguration, SniProxySourceConfiguration};
 use crate::infrastructure::provider::{
@@ -22,6 +23,11 @@ use crate::infrastructure::provider::{
 
 /// Maximum number of endpoints admission-probed concurrently during refresh.
 const PROBE_CONCURRENCY: usize = 8;
+/// Synthetic downloads are limited to latency-leading candidates. Endpoints
+/// outside this shortlist can still move up through real NAR observations.
+const BANDWIDTH_PROBE_CANDIDATES: usize = 3;
+/// Keep the current route unless a challenger is at least 20% faster.
+const SWITCH_HYSTERESIS_PERCENT: u128 = 20;
 
 /// Merge SNI proxy list IPs with extra configured IPs, deduplicated; list
 /// entries win over user-configured literals for the same address.
@@ -55,6 +61,28 @@ fn collect_candidates(
     candidates
 }
 
+fn bandwidth_probe_candidates(
+    endpoints: impl IntoIterator<Item = SubstituterEndpoint>,
+    now: Instant,
+    refresh_interval: Duration,
+) -> Vec<SubstituterEndpoint> {
+    let mut candidates: Vec<_> = endpoints
+        .into_iter()
+        .filter(|endpoint| matches!(endpoint.state(), EndpointState::Usable { .. }))
+        .collect();
+    candidates.sort_by_key(|endpoint| match endpoint.state() {
+        EndpointState::Usable {
+            admission_latency, ..
+        } => admission_latency,
+        _ => Duration::MAX,
+    });
+    candidates.truncate(BANDWIDTH_PROBE_CANDIDATES);
+    candidates
+        .into_iter()
+        .filter(|endpoint| endpoint.needs_bandwidth_probe(now, refresh_interval))
+        .collect()
+}
+
 /// Runtime state of SNI proxy candidates for a single logical host:
 /// list refresh, admission probing, failure tracking and selection ordering.
 pub struct EndpointManager {
@@ -73,6 +101,19 @@ pub struct EndpointManager {
     bandwidth_probe: Option<BandwidthProbeConfiguration>,
     /// First endpoint of the previous selection order, for change logging.
     last_selected: Mutex<Option<IpAddr>>,
+    /// Active user-facing NAR streams. Synthetic probes yield while this is
+    /// non-zero so they do not contend with user traffic.
+    active_downloads: AtomicUsize,
+}
+
+pub struct ActiveDownloadGuard {
+    manager: Arc<EndpointManager>,
+}
+
+impl Drop for ActiveDownloadGuard {
+    fn drop(&mut self) {
+        self.manager.active_downloads.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl EndpointManager {
@@ -99,6 +140,7 @@ impl EndpointManager {
             sni_proxy_source_provider,
             bandwidth_probe,
             last_selected: Mutex::new(None),
+            active_downloads: AtomicUsize::new(0),
         }
     }
 
@@ -292,30 +334,38 @@ impl EndpointManager {
         else {
             return;
         };
+        if self.active_downloads.load(Ordering::Acquire) != 0 {
+            tracing::debug!(host = %self.host, "skipping bandwidth benchmark while a NAR download is active");
+            return;
+        }
         let now = Instant::now();
-        let pending: Vec<SubstituterEndpoint> = self
+        let candidates = self
             .endpoints
             .iter()
-            .filter(|entry| entry.needs_bandwidth_probe(now, config.refresh_interval))
             .map(|entry| entry.value().clone())
-            .collect();
+            .collect::<Vec<_>>();
+        let pending = bandwidth_probe_candidates(candidates, now, config.refresh_interval);
         if pending.is_empty() {
             return;
         }
 
+        let active_downloads = &self.active_downloads;
         let results = futures::stream::iter(pending.into_iter().map(|endpoint| {
             let probing = Arc::clone(&self.probing);
             let config = config.clone();
             async move {
+                if active_downloads.load(Ordering::Acquire) != 0 {
+                    return None;
+                }
                 let result = probing.benchmark_endpoint(endpoint.ip(), &config).await;
-                (endpoint.ip(), result)
+                Some((endpoint.ip(), result))
             }
         }))
         .buffer_unordered(config.max_concurrent_probes.get())
         .collect::<Vec<_>>()
         .await;
 
-        for (ip, result) in results {
+        for (ip, result) in results.into_iter().flatten() {
             match result {
                 Ok(measurement) => {
                     if let Some(mut endpoint) = self.endpoints.get_mut(&ip) {
@@ -337,10 +387,52 @@ impl EndpointManager {
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        order_for_selection(&endpoints, Instant::now())
-            .into_iter()
-            .map(|endpoint| endpoint.ip())
-            .collect()
+        let mut ordered = order_for_selection(&endpoints, Instant::now());
+        let current = *self
+            .last_selected
+            .lock()
+            .expect("last_selected mutex is not poisoned");
+
+        if let (Some(current), Some(challenger)) = (current, ordered.first())
+            && challenger.ip() != current
+            && let Some(current_index) = ordered.iter().position(|entry| entry.ip() == current)
+        {
+            let score = |endpoint: &SubstituterEndpoint| match endpoint.state() {
+                EndpointState::Usable {
+                    bandwidth: Some(measurement),
+                    ..
+                } => measurement.estimated_download_time(10 * 1024 * 1024),
+                EndpointState::Usable {
+                    admission_latency, ..
+                } => admission_latency,
+                _ => Duration::MAX,
+            };
+            let challenger_nanos = score(challenger).as_nanos();
+            let current_nanos = score(&ordered[current_index]).as_nanos();
+            let sufficiently_faster = challenger_nanos.saturating_mul(100)
+                <= current_nanos.saturating_mul(100 - SWITCH_HYSTERESIS_PERCENT);
+            if !sufficiently_faster {
+                let current = ordered.remove(current_index);
+                ordered.insert(0, current);
+            }
+        }
+
+        ordered.into_iter().map(|endpoint| endpoint.ip()).collect()
+    }
+
+    /// Incorporate throughput observed while serving a real NAR download.
+    pub fn report_download_observation(&self, ip: IpAddr, measurement: BandwidthMeasurement) {
+        if let Some(mut endpoint) = self.endpoints.get_mut(&ip) {
+            *endpoint.value_mut() = endpoint.on_download_observed(measurement);
+        }
+        self.update_selected();
+    }
+
+    pub fn begin_download(self: &Arc<Self>) -> ActiveDownloadGuard {
+        self.active_downloads.fetch_add(1, Ordering::AcqRel);
+        ActiveDownloadGuard {
+            manager: Arc::clone(self),
+        }
     }
 
     /// Report a usage failure: transient failures cool the endpoint down,
@@ -662,5 +754,63 @@ mod tests {
         manager.report_failure(ip(1), EndpointFailureKind::Transient);
         manager.update_selected();
         assert_eq!(*manager.last_selected.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn bandwidth_probe_shortlist_uses_three_lowest_latency_endpoints() {
+        let now = Instant::now();
+        let endpoints = [40, 10, 30, 20].map(|latency| {
+            SubstituterEndpoint::new(ip(latency as u8), CandidateSource::SniProxy)
+                .on_admission_success(Duration::from_millis(latency))
+        });
+
+        let shortlisted = bandwidth_probe_candidates(endpoints, now, Duration::from_secs(60));
+        let ips: Vec<_> = shortlisted
+            .into_iter()
+            .map(|endpoint| endpoint.ip())
+            .collect();
+
+        assert_eq!(ips, vec![ip(10), ip(20), ip(30)]);
+    }
+
+    #[test]
+    fn selection_requires_twenty_percent_improvement_to_switch() {
+        let manager = make_manager(vec![]);
+        let now = Instant::now();
+        let measured = |octet, millis| {
+            SubstituterEndpoint::new(ip(octet), CandidateSource::SniProxy).with_state(
+                EndpointState::Usable {
+                    admission_latency: Duration::from_millis(20),
+                    bandwidth: Some(BandwidthMeasurement {
+                        time_to_first_byte: Duration::from_millis(millis),
+                        bytes_per_second: u64::MAX,
+                        sampled_at: now,
+                    }),
+                },
+            )
+        };
+        manager.endpoints.insert(ip(1), measured(1, 100));
+        manager.update_selected();
+        assert_eq!(*manager.last_selected.lock().unwrap(), Some(ip(1)));
+
+        manager.endpoints.insert(ip(2), measured(2, 90));
+        manager.update_selected();
+        assert_eq!(*manager.last_selected.lock().unwrap(), Some(ip(1)));
+
+        manager.endpoints.insert(ip(2), measured(2, 70));
+        manager.update_selected();
+        assert_eq!(*manager.last_selected.lock().unwrap(), Some(ip(2)));
+    }
+
+    #[test]
+    fn active_download_guard_tracks_stream_lifetime() {
+        let manager = Arc::new(make_manager(vec![]));
+        assert_eq!(manager.active_downloads.load(Ordering::Acquire), 0);
+
+        let guard = manager.begin_download();
+        assert_eq!(manager.active_downloads.load(Ordering::Acquire), 1);
+
+        drop(guard);
+        assert_eq!(manager.active_downloads.load(Ordering::Acquire), 0);
     }
 }

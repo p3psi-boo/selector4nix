@@ -67,7 +67,7 @@ impl GetDashboardConfigSummaryUseCase {
                 },
                 ConfigSummaryEntryData {
                     name: "Bandwidth benchmark",
-                    description: "Actively rank admitted endpoints by bounded download performance.",
+                    description: "Benchmark up to three latency-leading endpoints; real NAR downloads refine the ranking.",
                     value: cfg.bandwidth_probe.enabled.to_string(),
                 },
             ],
@@ -96,7 +96,7 @@ impl GetDashboardConfigSummaryUseCase {
                 },
                 ConfigSummaryEntryData {
                     name: "Bandwidth benchmark",
-                    description: "Actively rank admitted endpoints by bounded download performance.",
+                    description: "Benchmark up to three latency-leading endpoints; real NAR downloads refine the ranking.",
                     value: cfg.bandwidth_probe.enabled.to_string(),
                 },
             ],

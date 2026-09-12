@@ -54,18 +54,18 @@ candidates = []
 #   { url = "https://HOST/fastly-sni-proxies.txt", refresh_secs = 3600 },
 # ]
 
-# Active bounded download through every admitted Fastly SNI proxy.
+# Active bounded download through up to three latency-leading Fastly SNI proxies.
 # The measured TTFB and MiB/s determine proxy order.
 [fastly_optimization.bandwidth_probe]
 enabled = true
-# HTTPS sample URL. The default is an immutable cache.nixos.org NAR larger than 10 MiB.
+# HTTPS sample URL. The default is an immutable cache.nixos.org NAR larger than 1 MiB.
 url = "https://cache.nixos.org/nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst"
-# Number of bytes downloaded per benchmark (default: 10485760 = 10 MiB).
-bytes = 10485760
-# Re-benchmark an endpoint after this interval (default: 21600 = 6 hours).
-refresh_secs = 21600
-# Maximum simultaneous benchmark downloads (default: 2).
-max_concurrent_probes = 2
+# Number of bytes downloaded per benchmark (default: 1048576 = 1 MiB).
+bytes = 1048576
+# Re-benchmark an endpoint after this interval (default: 86400 = 24 hours).
+refresh_secs = 86400
+# Maximum simultaneous benchmark downloads (default: 1).
+max_concurrent_probes = 1
 
 # Cloudflare SNI proxy optimization for every automatically detected Cloudflare
 # substituter (global section), including but not limited to Cachix. Detection
@@ -91,15 +91,15 @@ candidates = []
 #   { url = "https://HOST/cloudflare-sni-proxies.txt", refresh_secs = 3600 },
 # ]
 
-# Active bounded download through every admitted Cloudflare SNI proxy.
+# Active bounded download through up to three latency-leading Cloudflare SNI proxies.
 # The default URL returns exactly `bytes` bytes from Cloudflare's speed
 # endpoint. Override it with another HTTPS URL that serves at least `bytes`.
 [cloudflare_optimization.bandwidth_probe]
 enabled = true
-url = "https://speed.cloudflare.com/__down?bytes=10485760"
-bytes = 10485760
-refresh_secs = 21600
-max_concurrent_probes = 2
+url = "https://speed.cloudflare.com/__down?bytes=1048576"
+bytes = 1048576
+refresh_secs = 86400
+max_concurrent_probes = 1
 
 # Proxy behavior settings.
 [proxy]

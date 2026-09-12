@@ -18,7 +18,7 @@ use crate::infrastructure::config::general_raw::{
 
 const DEFAULT_FASTLY_BANDWIDTH_PROBE_URL: &str =
     "https://cache.nixos.org/nar/1as5cn000kck2y35awm3825qvlvcnq08jbilwdlzdlv6pbidk3i4.nar.zst";
-const DEFAULT_BANDWIDTH_PROBE_BYTES: usize = 10 * 1024 * 1024;
+const DEFAULT_BANDWIDTH_PROBE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AppConfiguration {
@@ -441,9 +441,9 @@ impl BandwidthProbeConfiguration {
         Self {
             enabled: true,
             url: Url::new(url).expect("default bandwidth probe URL is valid"),
-            bytes: NonZeroUsize::new(DEFAULT_BANDWIDTH_PROBE_BYTES).expect("10 MiB is non-zero"),
-            refresh_interval: Duration::from_secs(6 * 60 * 60),
-            max_concurrent_probes: NonZeroUsize::new(2).expect("2 is non-zero"),
+            bytes: NonZeroUsize::new(DEFAULT_BANDWIDTH_PROBE_BYTES).expect("1 MiB is non-zero"),
+            refresh_interval: Duration::from_secs(24 * 60 * 60),
+            max_concurrent_probes: NonZeroUsize::new(1).expect("1 is non-zero"),
         }
     }
 
@@ -476,12 +476,12 @@ impl BandwidthProbeConfiguration {
             bytes,
             refresh_interval: raw
                 .refresh_secs
-                .map_or(Duration::from_secs(6 * 60 * 60), |seconds| {
+                .map_or(Duration::from_secs(24 * 60 * 60), |seconds| {
                     Duration::from_secs(seconds.get())
                 }),
             max_concurrent_probes: raw
                 .max_concurrent_probes
-                .unwrap_or(NonZeroUsize::new(2).unwrap()),
+                .unwrap_or(NonZeroUsize::new(1).unwrap()),
         })
     }
 }

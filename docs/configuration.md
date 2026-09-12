@@ -103,7 +103,7 @@ When `fastly_optimization.enabled` is true, every substituter classified as Fast
 
 Candidates come from Fastly-specific `sni_proxy_sources` and extra IP literals in `candidates`. They are never mixed with the Cloudflare platform. Every candidate must pass an end-to-end admission probe — a TLS handshake plus `GET /nix-cache-info` through that IP — before it is considered usable. The original URL, Host, SNI, and certificate verification remain intact, so a proxy is admitted only when it forwards the original TLS connection correctly.
 
-Newly admitted and stale proxies are actively benchmarked with a bounded HTTPS download. They are ordered by estimated 10 MiB download time using measured TTFB and throughput; NAR bytes are discarded instead of cached. A failed benchmark does not revoke admission. A failing request automatically tries another proxy and then the default system-DNS path.
+Up to three latency-leading proxies are actively benchmarked with a bounded HTTPS download, and a benchmark round is skipped while a user-facing NAR download is active. Real NAR transfers update the selected proxy's TTFB and throughput estimate at no additional bandwidth cost. Measurements are smoothed and route changes require a material improvement, avoiding selection churn. A failed benchmark does not revoke admission. A failing request automatically tries another proxy and then the default system-DNS path.
 
 Note that SNI proxy requests do not use HTTP(S)_PROXY or other environment proxies; they connect directly to the selected IP. All Range requests of a chunked NAR download are pinned to the same proxy, and the concurrency quota is still shared per logical host.
 
@@ -145,7 +145,7 @@ Minimum interval between source reloads.
 
 ### `fastly_optimization.bandwidth_probe`
 
-Active bounded-download benchmark settings. The default URL is an immutable `cache.nixos.org` NAR larger than the default 10 MiB sample.
+Active bounded-download benchmark settings. The default URL is an immutable `cache.nixos.org` NAR larger than the default 1 MiB sample.
 
 #### `fastly_optimization.bandwidth_probe.enabled`
 
@@ -160,17 +160,17 @@ Active bounded-download benchmark settings. The default URL is an immutable `cac
 #### `fastly_optimization.bandwidth_probe.bytes`
 
 - Type: Positive Integer
-- Default: `10485760`
+- Default: `1048576`
 
 #### `fastly_optimization.bandwidth_probe.refresh_secs`
 
 - Type: Positive Integer
-- Default: `21600`
+- Default: `86400`
 
 #### `fastly_optimization.bandwidth_probe.max_concurrent_probes`
 
 - Type: Positive Integer
-- Default: `2`
+- Default: `1`
 
 ## `cloudflare_optimization`
 
@@ -230,24 +230,24 @@ Active bounded-download benchmark settings. By default the URL is generated as `
 #### `cloudflare_optimization.bandwidth_probe.url`
 
 - Type: HTTPS URL
-- Default: `https://speed.cloudflare.com/__down?bytes=10485760`
+- Default: `https://speed.cloudflare.com/__down?bytes=1048576`
 
 The response must contain at least the configured number of bytes. The client requests a bounded Range and stops after collecting the sample.
 
 #### `cloudflare_optimization.bandwidth_probe.bytes`
 
 - Type: Positive Integer
-- Default: `10485760`
+- Default: `1048576`
 
 #### `cloudflare_optimization.bandwidth_probe.refresh_secs`
 
 - Type: Positive Integer
-- Default: `21600`
+- Default: `86400`
 
 #### `cloudflare_optimization.bandwidth_probe.max_concurrent_probes`
 
 - Type: Positive Integer
-- Default: `2`
+- Default: `1`
 
 ## `proxy`
 

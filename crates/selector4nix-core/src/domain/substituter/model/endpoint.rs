@@ -53,6 +53,33 @@ impl BandwidthMeasurement {
         self.time_to_first_byte
             .saturating_add(Duration::from_nanos(transfer_nanos as u64))
     }
+
+    /// Blend an observation from a real NAR transfer into this estimate.
+    /// History carries 80% of the weight to avoid route churn from bursts.
+    pub fn merge_observation(&self, observation: Self) -> Self {
+        const HISTORY_WEIGHT: u128 = 4;
+        const TOTAL_WEIGHT: u128 = 5;
+
+        let weighted_nanos = self
+            .time_to_first_byte
+            .as_nanos()
+            .saturating_mul(HISTORY_WEIGHT)
+            .saturating_add(observation.time_to_first_byte.as_nanos())
+            / TOTAL_WEIGHT;
+        let bytes_per_second = (u128::from(self.bytes_per_second)
+            .saturating_mul(HISTORY_WEIGHT)
+            .saturating_add(u128::from(observation.bytes_per_second))
+            / TOTAL_WEIGHT)
+            .min(u128::from(u64::MAX)) as u64;
+
+        Self {
+            time_to_first_byte: Duration::from_nanos(
+                weighted_nanos.min(u128::from(u64::MAX)) as u64
+            ),
+            bytes_per_second,
+            sampled_at: observation.sampled_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +151,22 @@ impl SubstituterEndpoint {
             } => self.with_state(EndpointState::Usable {
                 admission_latency,
                 bandwidth: Some(measurement),
+            }),
+            _ => self.clone(),
+        }
+    }
+
+    pub fn on_download_observed(&self, observation: BandwidthMeasurement) -> Self {
+        match self.state {
+            EndpointState::Usable {
+                admission_latency,
+                bandwidth,
+            } => self.with_state(EndpointState::Usable {
+                admission_latency,
+                bandwidth: Some(match bandwidth {
+                    Some(previous) => previous.merge_observation(observation),
+                    None => observation,
+                }),
             }),
             _ => self.clone(),
         }
@@ -354,5 +397,26 @@ mod tests {
         assert!(
             fresh.needs_bandwidth_probe(now + Duration::from_secs(60), Duration::from_secs(60))
         );
+    }
+
+    #[test]
+    fn real_download_observations_are_smoothed() {
+        let now = Instant::now();
+        let previous = BandwidthMeasurement {
+            time_to_first_byte: Duration::from_millis(100),
+            bytes_per_second: 10_000,
+            sampled_at: now,
+        };
+        let observation = BandwidthMeasurement {
+            time_to_first_byte: Duration::from_millis(200),
+            bytes_per_second: 20_000,
+            sampled_at: now + Duration::from_secs(1),
+        };
+
+        let merged = previous.merge_observation(observation);
+
+        assert_eq!(merged.time_to_first_byte, Duration::from_millis(120));
+        assert_eq!(merged.bytes_per_second, 12_000);
+        assert_eq!(merged.sampled_at, observation.sampled_at);
     }
 }

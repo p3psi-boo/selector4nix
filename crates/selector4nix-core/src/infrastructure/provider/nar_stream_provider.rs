@@ -1,12 +1,15 @@
 use std::error::Error as _;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result as AnyhowResult;
 use async_trait::async_trait;
+use futures::StreamExt;
 use http::header;
 use selector4nix_streaming::{StreamHttpBodyError, StreamingClient, StreamingResponse};
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::domain::common::passthrough_headers::PassthroughHeaders;
 use crate::domain::common::url::Url;
@@ -14,7 +17,7 @@ use crate::domain::nar_file::model::NarFileLocation;
 use crate::domain::nar_file::port::{
     NarStreamData, NarStreamHeaders, NarStreamOpenAttempt, NarStreamProvider,
 };
-use crate::domain::substituter::model::EndpointFailureKind;
+use crate::domain::substituter::model::{BandwidthMeasurement, EndpointFailureKind};
 use crate::infrastructure::config::AppCredential;
 use crate::infrastructure::endpoint::manager::EndpointManager;
 use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
@@ -81,6 +84,7 @@ impl ReqwestNarStreamProvider {
     fn wrap_ok_response(
         url: Url,
         response: StreamingResponse,
+        observation: Option<(Arc<EndpointManager>, IpAddr, Instant)>,
     ) -> AnyhowResult<Option<NarStreamData>> {
         let headers = NarStreamHeaders {
             content_length: response.content_length(),
@@ -97,6 +101,51 @@ impl ReqwestNarStreamProvider {
         };
 
         let stream = response.into_stream();
+        let stream = if let Some((manager, ip, request_started)) = observation {
+            let download_guard = manager.begin_download();
+            let mut first_byte_at = None;
+            let mut observed_bytes = 0usize;
+            let mut reported = false;
+            Box::pin(stream.map(move |item| {
+                let _guard = &download_guard;
+                if let Ok(chunk) = &item
+                    && !reported
+                    && !chunk.is_empty()
+                {
+                    let now = Instant::now();
+                    let first_byte_at = *first_byte_at.get_or_insert(now);
+                    observed_bytes = observed_bytes.saturating_add(chunk.len());
+                    let transfer_elapsed = now.duration_since(first_byte_at);
+
+                    // Wait for enough data or time to avoid ranking on the
+                    // first small transport chunk. This traffic is already
+                    // being sent to the user, so the sample has no bandwidth
+                    // overhead.
+                    if observed_bytes >= 1024 * 1024
+                        || (observed_bytes >= 64 * 1024
+                            && transfer_elapsed >= Duration::from_millis(500))
+                    {
+                        let transfer_elapsed = transfer_elapsed.max(Duration::from_millis(1));
+                        let bytes_per_second =
+                            ((observed_bytes as u128).saturating_mul(1_000_000_000)
+                                / transfer_elapsed.as_nanos())
+                            .min(u128::from(u64::MAX)) as u64;
+                        manager.report_download_observation(
+                            ip,
+                            BandwidthMeasurement {
+                                time_to_first_byte: first_byte_at.duration_since(request_started),
+                                bytes_per_second,
+                                sampled_at: now,
+                            },
+                        );
+                        reported = true;
+                    }
+                }
+                item
+            })) as _
+        } else {
+            stream
+        };
         Ok(Some(NarStreamData::new(headers, stream, url)))
     }
 }
@@ -172,6 +221,7 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
                         }
                     });
 
+                    let request_started = Instant::now();
                     let attempt = if let Some(timeout) = location.timeout() {
                         tokio::time::timeout(timeout, request.send()).await
                     } else {
@@ -212,7 +262,18 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
                         }
                     };
 
-                    last_response = Some(attempt);
+                    let observation = ip.map(|ip| {
+                        (
+                            Arc::clone(
+                                endpoint_manager
+                                    .as_ref()
+                                    .expect("endpoint manager is present for endpoint attempts"),
+                            ),
+                            ip,
+                            request_started,
+                        )
+                    });
+                    last_response = Some((attempt, observation));
                     if !retry_with_next_endpoint {
                         break;
                     }
@@ -226,7 +287,7 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
         let mut attempts = Vec::new();
 
         while let Some(result) = set.join_next().await {
-            let Ok((location, response)) = result else {
+            let Ok((location, (response, observation))) = result else {
                 continue;
             };
             let url = location.source_url();
@@ -236,7 +297,7 @@ impl NarStreamProvider for ReqwestNarStreamProvider {
                     attempts.push(NarStreamOpenAttempt::Successful {
                         source_url: url.clone(),
                     });
-                    let response = Self::wrap_ok_response(url.clone(), response);
+                    let response = Self::wrap_ok_response(url.clone(), response, observation);
                     return (response, attempts);
                 }
                 Ok(Err(StreamHttpBodyError::NotFound)) => {

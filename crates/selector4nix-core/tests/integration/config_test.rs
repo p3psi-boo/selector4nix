@@ -234,7 +234,26 @@ fn cloudflare_optimization_defaults_to_disabled() {
     assert!(config.cloudflare_optimization.bandwidth_probe.enabled);
     assert_eq!(
         config.cloudflare_optimization.bandwidth_probe.url.value(),
-        "https://speed.cloudflare.com/__down?bytes=10485760"
+        "https://speed.cloudflare.com/__down?bytes=1048576"
+    );
+    assert_eq!(
+        config.cloudflare_optimization.bandwidth_probe.bytes.get(),
+        1048576
+    );
+    assert_eq!(
+        config
+            .cloudflare_optimization
+            .bandwidth_probe
+            .refresh_interval,
+        Duration::from_secs(86400)
+    );
+    assert_eq!(
+        config
+            .cloudflare_optimization
+            .bandwidth_probe
+            .max_concurrent_probes
+            .get(),
+        1
     );
 }
 

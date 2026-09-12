@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/2.0.0/),
 ### Changed
 
 - Fastly and Cloudflare optimization now use only SNI proxies. DoH lookups of the substituter, Cloudflare `discovery_domains`, and Fastly `derive_regions` are no longer used as endpoint candidates. Extra IP literals in `candidates` are treated as additional SNI proxy IPs. CDN detection still uses DoH so each host gets the matching platform's proxy list.
+- Bandwidth probing now defaults to a 1 MiB sample every 24 hours with one active download, skips runs while user-facing NAR downloads are active, and only probes the three best admission-latency candidates. Real NAR downloads feed smoothed throughput measurements back into endpoint selection, while 20% switching hysteresis prevents route churn.
 
 ### Removed
 
