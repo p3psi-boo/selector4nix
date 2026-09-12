@@ -136,7 +136,51 @@ impl Stream for InstrumentedNarStream {
                 self.handle.record_bytes(bytes.len() as u64);
                 Poll::Ready(Some(Ok(bytes)))
             }
+            Poll::Ready(None) => {
+                self.handle.complete();
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.handle.fail();
+                Poll::Ready(Some(Err(error)))
+            }
             other => other,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::common::url::Url;
+    use crate::domain::nar_info::model::NarFileName;
+    use futures::{StreamExt, stream};
+
+    #[tokio::test]
+    async fn stream_outcomes_survive_handle_drop() {
+        for (chunks, expected) in [
+            (vec![Ok(Bytes::from_static(b"abc"))], "Completed"),
+            (
+                vec![Err(anyhow::anyhow!("upstream disconnected"))],
+                "Failed: stream error",
+            ),
+        ] {
+            let metric = Arc::new(NarTransferMetric::new());
+            let mut stream = InstrumentedNarStream {
+                inner: Box::pin(stream::iter(chunks)),
+                handle: metric.begin(NarTransferMeta {
+                    nar_file_name: NarFileName::new("test.nar".into()).unwrap(),
+                    store_path: None,
+                    substituter_url: Url::new("https://cache.example.org/").unwrap(),
+                    source_url: Url::new("https://cache.example.org/test.nar").unwrap(),
+                    content_length: None,
+                }),
+            };
+            while stream.next().await.is_some() {}
+            drop(stream);
+            let recent = metric.recent();
+            assert_eq!(recent.len(), 1);
+            assert_eq!(recent[0].outcome, Some(expected));
         }
     }
 }
