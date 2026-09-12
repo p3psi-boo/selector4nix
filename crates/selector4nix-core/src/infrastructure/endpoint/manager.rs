@@ -452,6 +452,10 @@ impl EndpointManager {
 
     /// All known endpoints, usable ones first ordered by the active selection score,
     /// then pending, then cooling, then incompatible.
+    pub fn runtime_candidates(&self) -> Vec<IpAddr> {
+        self.runtime_candidates.lock().unwrap().clone()
+    }
+
     pub fn snapshot(&self) -> Vec<EndpointSnapshot> {
         fn rank(status: &EndpointSnapshotStatus) -> (u8, Duration) {
             match status {

@@ -66,3 +66,89 @@
     scroll-behavior: auto !important;
   }
 }
+
+@layer components {
+  .site-header {
+    @apply sticky top-0 z-20 border-b border-line bg-surface;
+  }
+  .site-nav {
+    @apply mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3;
+  }
+  .site-nav nav {
+    @apply flex flex-wrap gap-1;
+  }
+  .site-nav nav a {
+    @apply rounded px-3 py-2 text-sm font-medium hover:bg-canvas;
+  }
+  .site-nav nav a[aria-current="page"] {
+    @apply bg-accent-subtle text-accent underline underline-offset-4;
+  }
+  .skip-link {
+    @apply sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:bg-surface focus:p-3;
+  }
+  h1 {
+    @apply text-2xl font-semibold tracking-tight;
+  }
+  .page-heading {
+    @apply flex flex-wrap items-start justify-between gap-3;
+  }
+  .panel {
+    @apply min-w-0 rounded-card border border-line bg-surface p-4;
+  }
+  .metric {
+    @apply my-2 text-2xl font-semibold tabular-nums;
+  }
+  .button {
+    @apply inline-flex min-h-10 items-center justify-center rounded border border-line bg-surface px-3 py-2 text-sm font-medium hover:bg-canvas disabled:cursor-wait disabled:opacity-60;
+  }
+  .button.primary {
+    @apply border-accent bg-accent text-accent-fg hover:bg-accent/90;
+  }
+  .button.danger {
+    @apply border-danger text-danger hover:bg-danger-subtle;
+  }
+  .field {
+    @apply flex min-w-0 flex-col gap-1 text-sm font-medium;
+  }
+  .field input,
+  .field select {
+    @apply w-full min-w-0 rounded border border-line bg-surface px-3 py-2 text-base font-normal sm:text-sm;
+  }
+  .form-row {
+    @apply flex flex-col gap-3 md:flex-row md:items-end;
+  }
+  .form-feedback {
+    @apply mt-2 max-w-prose text-sm break-words;
+  }
+  .form-feedback:empty {
+    @apply hidden;
+  }
+  details > summary {
+    @apply cursor-pointer rounded py-2 text-sm font-medium;
+  }
+  .endpoint {
+    @apply grid gap-3 border-t border-line-soft py-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_minmax(0,1.5fr)];
+  }
+  .endpoint-metrics {
+    @apply grid grid-cols-3 gap-2 text-xs;
+  }
+  .endpoint-metrics dt {
+    @apply text-muted;
+  }
+  .endpoint-metrics dd {
+    @apply mt-1 font-mono tabular-nums;
+  }
+  .break-anywhere {
+    overflow-wrap: anywhere;
+  }
+  .config-row {
+    @apply flex flex-col gap-2 border-t border-line-soft py-3 sm:flex-row sm:justify-between;
+  }
+  .config-row dd {
+    overflow-wrap: anywhere;
+    @apply min-w-0 font-mono text-sm sm:max-w-[50%] sm:text-right;
+  }
+}
+[hidden] {
+  display: none !important;
+}

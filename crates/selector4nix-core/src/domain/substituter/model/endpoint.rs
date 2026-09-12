@@ -209,6 +209,7 @@ pub struct EndpointSnapshot {
     pub ip: IpAddr,
     pub source: CandidateSource,
     pub status: EndpointSnapshotStatus,
+    pub retry_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +238,12 @@ impl EndpointSnapshot {
             EndpointState::Incompatible => EndpointSnapshotStatus::Incompatible,
         };
         Self {
+            retry_after_secs: match endpoint.state() {
+                EndpointState::Cooling { until } => {
+                    Some(until.saturating_duration_since(Instant::now()).as_secs())
+                }
+                _ => None,
+            },
             ip: endpoint.ip(),
             source: endpoint.source(),
             status,

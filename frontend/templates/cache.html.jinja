@@ -1,84 +1,69 @@
 {% extends "base.html.jinja" %}
-
+{% block title %}Cache{% endblock %}
+{% macro duration(seconds) %}{% if seconds >= 3600 %}
+  {{ (seconds / 3600) | round(1) }}
+  hours
+{% elif seconds >= 60 %}
+  {{ (seconds / 60) | round(1) }}
+  minutes
+{% else %}
+  {{ seconds }}
+  seconds
+{% endif %}{% endmacro %}
 {% block content %}
+  <div class="mb-6">
+    <h1>Metadata cache</h1>
+    <p class="text-muted">
+      Counts are metadata and runtime state entries. NAR file contents are streamed, not cached locally.
+    </p>
+  </div>
+  <p id="refresh-status" class="mb-4 text-sm text-muted" role="status">Updates every 5 seconds.</p>
   <div
     id="cache"
-    class="space-y-8"
+    class="space-y-6"
     hx-get="/dashboard/cache"
     hx-trigger="every 5s"
     hx-target="this"
     hx-swap="outerHTML"
+    hx-select="#cache"
   >
     <section>
-      <h2 class="mb-3 font-semibold">Cache Usage Statistics</h2>
-
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">NAR info cache</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            <span class="text-xl font-semibold">{{ model.cache.nar_info.size }}</span>
-            <span class="text-sm text-muted">/ {{ model.cache.nar_info.capacity }} max capacity</span>
+      <h2 class="mb-3 font-semibold">Active state cache</h2>
+      <p class="mb-3 text-sm text-muted">
+        In-memory entries used to coordinate requests. Capacity is an entry limit, not disk space.
+      </p>
+      <div class="grid gap-3 sm:grid-cols-2">
+        {% for name, item in [('NAR info state', model.cache.nar_info), ('NAR file state', model.cache.nar_file)] %}
+          <div class="panel">
+            <h3 class="text-sm font-medium">{{ name }}</h3>
+            <p class="metric">
+              {{ item.size }} <span class="text-sm font-normal text-muted">/ {{ item.capacity }} entries</span>
+            </p>
+            <p class="text-xs text-muted">{{ (item.size / item.capacity * 100) | round(1) }}% of capacity</p>
           </div>
-          <span class="mt-1.5 text-xs text-muted">
-            {% with percentage = model.cache.nar_info.size / model.cache.nar_info.capacity * 100 %}
-              Usage {{ percentage | round(1) }}%
-            {% endwith %}
-          </span>
-        </div>
-
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">NAR file cache</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            <span class="text-xl font-semibold">{{ model.cache.nar_file.size }}</span>
-            <span class="text-sm text-muted">/ {{ model.cache.nar_file.capacity }} max capacity</span>
-          </div>
-          <span class="mt-1.5 text-xs text-muted">
-            {% with percentage = model.cache.nar_file.size / model.cache.nar_file.capacity * 100 %}
-              Usage {{ percentage | round(1) }}%
-            {% endwith %}
-          </span>
-        </div>
+        {% endfor %}
       </div>
     </section>
-
     <section>
-      <h2 class="mb-3 font-semibold">Store Usage Statistics</h2>
-
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">NAR info store</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            {% if model.store.nar_info.size is not none %}
-              <span class="text-xl font-semibold">{{ model.store.nar_info.size }}</span>
-              <span class="text-sm text-muted">saved</span>
-            {% else %}
-              <span class="text-sm text-muted">Size unknown</span>
-            {% endif %}
+      <h2 class="mb-3 font-semibold">Stored metadata</h2>
+      <div class="grid gap-3 sm:grid-cols-2">
+        {% for name, item in [('NAR info metadata', model.store.nar_info), ('NAR file metadata', model.store.nar_file)] %}
+          <div class="panel">
+            <h3 class="text-sm font-medium">{{ name }}</h3>
+            <p class="metric">
+              {% if item.size is not none %}
+                {{ item.size }} <span class="text-sm font-normal text-muted">entries</span>
+              {% else %}
+                <span class="text-base">Count unavailable</span>
+              {% endif %}
+            </p>
+            <p class="text-xs text-muted">
+              {{ 'In memory · cleared on restart' if item.cache_mode == 'InMemory' else 'Persistent · retained across restarts' }}
+              · TTL {{ duration(item.ttl_secs) }}
+            </p>
           </div>
-          <span class="mt-1.5 text-xs text-muted">
-            {% with cache_mode = "In-memory" if model.store.nar_info.cache_mode == "InMemory" else "Persistent" %}
-              {{ cache_mode ~ " · TTL " ~ model.store.nar_info.ttl_secs ~ "s" }}
-            {% endwith %}
-          </span>
-        </div>
-
-        <div class="rounded-card border border-line bg-surface p-4">
-          <h3 class="text-sm font-medium">NAR file store</h3>
-          <div class="mt-2 flex items-baseline gap-1.5">
-            {% if model.store.nar_file.size is not none %}
-              <span class="text-xl font-semibold">{{ model.store.nar_file.size }}</span>
-              <span class="text-sm text-muted">saved</span>
-            {% else %}
-              <span class="text-sm text-muted">Size unknown</span>
-            {% endif %}
-          </div>
-          <span class="mt-1.5 text-xs text-muted">
-            {% with cache_mode = "In-memory" if model.store.nar_file.cache_mode == "InMemory" else "Persistent" %}
-              {{ cache_mode ~ " · TTL " ~ model.store.nar_file.ttl_secs ~ "s" }}
-            {% endwith %}
-          </span>
-        </div>
+        {% endfor %}
       </div>
     </section>
   </div>
-{% endblock content %}
+{% endblock %}

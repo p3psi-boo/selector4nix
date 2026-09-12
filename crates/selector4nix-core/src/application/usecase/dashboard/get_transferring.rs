@@ -1,19 +1,23 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::domain::common::url::Url;
 use crate::domain::nar_info::model::NarFileName;
-use crate::infrastructure::metric::NarTransferMetric;
+use crate::infrastructure::metric::{NarTransferMetric, NarTransferMetricEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct TransferringData {
     pub files: Vec<TransferringFileItemData>,
+    pub recent: Vec<TransferringFileItemData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct TransferringFileItemData {
+    pub id: u64,
+    pub bytes_per_second: u64,
+    pub remaining_secs: Option<u64>,
+    pub outcome: Option<&'static str>,
     pub package_name: Option<String>,
     pub nar_file_name: NarFileName,
     pub substituter_url: Url,
@@ -35,24 +39,45 @@ impl GetDashboardTransferringUseCase {
     }
 
     pub async fn run(&self) -> TransferringData {
-        let entries = self.nar_transfer_metric.transferring();
         TransferringData {
-            files: entries
+            files: self
+                .nar_transfer_metric
+                .transferring()
                 .into_iter()
-                .map(|e| {
-                    let elapsed = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap())
-                        - Duration::from_millis(e.started_at_unix_ms);
-                    TransferringFileItemData {
-                        package_name: e.meta.store_path.and_then(|s| Self::parse_package_name(&s)),
-                        nar_file_name: e.meta.nar_file_name,
-                        substituter_url: e.meta.substituter_url,
-                        bytes_total: e.meta.content_length,
-                        bytes_transferred: e.bytes_transferred,
-                        elapsed_secs: elapsed.as_secs(),
-                        started_at_unix_ms: e.started_at_unix_ms,
-                    }
-                })
+                .map(Self::item)
                 .collect(),
+            recent: self
+                .nar_transfer_metric
+                .recent()
+                .into_iter()
+                .map(Self::item)
+                .collect(),
+        }
+    }
+
+    fn item(e: NarTransferMetricEntry) -> TransferringFileItemData {
+        let bytes_per_second = e.bytes_per_second();
+        let elapsed_secs = e.elapsed_secs();
+        TransferringFileItemData {
+            id: e.id,
+            bytes_per_second,
+            remaining_secs: e
+                .meta
+                .content_length
+                .filter(|_| bytes_per_second > 0)
+                .map(|total| {
+                    total
+                        .saturating_sub(e.bytes_transferred)
+                        .div_ceil(bytes_per_second)
+                }),
+            outcome: e.outcome,
+            package_name: e.meta.store_path.and_then(|s| Self::parse_package_name(&s)),
+            nar_file_name: e.meta.nar_file_name,
+            substituter_url: e.meta.substituter_url,
+            bytes_total: e.meta.content_length,
+            bytes_transferred: e.bytes_transferred,
+            elapsed_secs,
+            started_at_unix_ms: e.started_at_unix_ms,
         }
     }
 

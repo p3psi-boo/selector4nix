@@ -108,6 +108,22 @@ The cache directory can be safely deleted at any time, though this cause loss of
 
 ## Usage
 
+### Dashboard
+
+Open `/dashboard/` on the proxy to inspect upstream health, expand endpoint details,
+filter by status, and sort probe latency, time to first byte, or bandwidth.
+The dashboard also shows current throughput and the last 50 finished streams
+(completed, failed, or cancelled). This history is in memory and resets on restart;
+errors before a stream opens are available in service logs.
+
+Adding or enabling/disabling an upstream and adding SNI proxy IPs take effect at
+runtime only. The SNI form lists existing upstreams with an endpoint manager and
+keeps your selection after a successful addition. Use **Keep runtime changes** to
+copy a TOML or Nix entry and merge it into your configuration. Preserve existing
+per-upstream limits; remove an upstream's entry to keep it disabled. Add temporary
+SNI IPs to `candidates` in the matching platform's optimization section.
+
+
 ### Ad-hoc
 
 Start the proxy in an ad-hoc style, on whatever OS:

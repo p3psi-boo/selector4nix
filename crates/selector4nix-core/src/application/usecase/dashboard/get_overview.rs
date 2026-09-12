@@ -10,7 +10,7 @@ use crate::domain::substituter::SubstituterRepository;
 use crate::domain::substituter::model::{
     Availability, CandidateSource, EndpointSnapshotStatus, Priority,
 };
-use crate::infrastructure::config::AppCredential;
+use crate::infrastructure::config::{AppConfiguration, AppCredential};
 use crate::infrastructure::endpoint::registry::EndpointManagerRegistry;
 use crate::infrastructure::metric::NarTransferMetric;
 
@@ -28,6 +28,8 @@ pub struct OverviewSummaryData {
     nar_info_cache_size: usize,
     nar_info_cache_capacity: NonZeroUsize,
     cache_mode: CacheMode,
+    bytes_per_second: u64,
+    recent_failures: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -44,6 +46,9 @@ pub struct OverviewSubstituterItemData {
     has_credential: bool,
     status: SubstituterStatus,
     endpoints: Vec<OverviewEndpointItemData>,
+    supports_sni: bool,
+    runtime_changed: bool,
+    status_detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -51,6 +56,11 @@ pub struct OverviewEndpointItemData {
     ip: IpAddr,
     source: String,
     status: String,
+    detail: String,
+    admission_ms: Option<u128>,
+    ttfb_ms: Option<u128>,
+    bytes_per_second: Option<u64>,
+    runtime_added: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -63,6 +73,7 @@ pub enum SubstituterStatus {
 }
 
 pub struct GetDashboardOverviewUseCase {
+    config: Arc<AppConfiguration>,
     substituter_repository: Arc<dyn SubstituterRepository>,
     nar_info_registry: Arc<NarInfoActorRegistry>,
     nar_transfer_metric: Arc<NarTransferMetric>,
@@ -81,8 +92,10 @@ impl GetDashboardOverviewUseCase {
         endpoint_managers: EndpointManagerRegistry,
         nar_info_cache_capacity: NonZeroUsize,
         has_persistent_cache: bool,
+        config: Arc<AppConfiguration>,
     ) -> Self {
         Self {
+            config,
             substituter_repository,
             nar_info_registry,
             nar_transfer_metric,
@@ -101,6 +114,18 @@ impl GetDashboardOverviewUseCase {
         let substituters = self.substituter_repository.query_all().await;
 
         let summary = OverviewSummaryData {
+            bytes_per_second: self
+                .nar_transfer_metric
+                .transferring()
+                .iter()
+                .map(|e| e.bytes_per_second())
+                .sum(),
+            recent_failures: self
+                .nar_transfer_metric
+                .recent()
+                .iter()
+                .filter(|e| e.outcome.is_some_and(|s| s.starts_with("Failed")))
+                .count(),
             available_substituters: substituters.iter().filter(|s| s.is_selectable()).count(),
             total_substituters: substituters.len(),
             transferring_nar_files: self.nar_transfer_metric.transferring_count(),
@@ -127,6 +152,20 @@ impl GetDashboardOverviewUseCase {
                     }
                 },
                 endpoints: self.endpoints_for(s.url()),
+                supports_sni: self.endpoint_managers.for_host(s.url().host()).is_some(),
+                runtime_changed: !s.is_enabled() || !self.config.substituters.iter().any(|c| &c.url == s.url()) || self.endpoint_managers.for_host(s.url().host()).is_some_and(|m| !m.runtime_candidates().is_empty()),
+                status_detail: if !s.is_enabled() {
+                    "Excluded from selection. Enable to use this upstream again. Restarts restore configured upstreams.".into()
+                } else {
+                    match s.availability() {
+                        Availability::Normal => "Available for cache queries and downloads.".into(),
+                        Availability::MaybeReady { .. } => "Eligible for a recovery attempt; a successful request confirms recovery.".into(),
+                        state @ (Availability::Offline { detected_at } | Availability::ServiceError { detected_at, .. }) => {
+                            let remaining = state.retry_duration().unwrap_or_default().saturating_sub(detected_at.elapsed()).as_secs();
+                            format!("Temporarily excluded after an upstream failure. Recovery eligible in {remaining}s. If this persists, check the upstream URL and service logs.")
+                        }
+                    }
+                },
             })
             .collect::<Vec<_>>();
         substituters.sort_by(|lhs, rhs| (lhs.priority, &lhs.url).cmp(&(rhs.priority, &rhs.url)));
@@ -143,36 +182,64 @@ impl GetDashboardOverviewUseCase {
         let Some(manager) = self.endpoint_managers.for_host(url.host()) else {
             return Vec::new();
         };
+        let runtime_candidates = manager.runtime_candidates();
         manager
             .snapshot()
             .into_iter()
-            .map(|snapshot| OverviewEndpointItemData {
-                ip: snapshot.ip,
-                source: match snapshot.source {
-                    CandidateSource::SniProxy => "SNI proxy",
-                    CandidateSource::UserConfigured => "configured",
-                }
-                .to_string(),
-                status: match snapshot.status {
+            .map(|snapshot| {
+                let (status, detail, admission_ms, ttfb_ms, bytes_per_second) = match snapshot
+                    .status
+                {
                     EndpointSnapshotStatus::Usable {
                         admission_latency,
                         bandwidth,
-                    } => {
-                        if let Some(bandwidth) = bandwidth {
-                            format!(
-                                "Usable (admission {}ms, TTFB {}ms, {:.1} MiB/s)",
-                                admission_latency.as_millis(),
-                                bandwidth.time_to_first_byte.as_millis(),
-                                bandwidth.bytes_per_second as f64 / (1024.0 * 1024.0),
-                            )
-                        } else {
-                            format!("Usable (admission {}ms)", admission_latency.as_millis())
-                        }
+                    } => (
+                        "Usable",
+                        "Available for downloads.".to_string(),
+                        Some(admission_latency.as_millis()),
+                        bandwidth.map(|b| b.time_to_first_byte.as_millis()),
+                        bandwidth.map(|b| b.bytes_per_second),
+                    ),
+                    EndpointSnapshotStatus::Pending => (
+                        "Pending",
+                        "Waiting for an admission probe. Refreshes automatically.".into(),
+                        None,
+                        None,
+                        None,
+                    ),
+                    EndpointSnapshotStatus::Cooling => (
+                        "Cooling",
+                        format!(
+                            "Temporarily avoided after a network failure. Eligible again in {}s.",
+                            snapshot.retry_after_secs.unwrap_or(0)
+                        ),
+                        None,
+                        None,
+                        None,
+                    ),
+                    EndpointSnapshotStatus::Incompatible => (
+                        "Incompatible",
+                        "TLS certificate does not match this upstream. Use a different proxy IP."
+                            .into(),
+                        None,
+                        None,
+                        None,
+                    ),
+                };
+                OverviewEndpointItemData {
+                    ip: snapshot.ip,
+                    source: match snapshot.source {
+                        CandidateSource::SniProxy => "SNI proxy",
+                        CandidateSource::UserConfigured => "Configured",
                     }
-                    EndpointSnapshotStatus::Pending => "Pending".to_string(),
-                    EndpointSnapshotStatus::Cooling => "Cooling".to_string(),
-                    EndpointSnapshotStatus::Incompatible => "Incompatible".to_string(),
-                },
+                    .into(),
+                    status: status.into(),
+                    detail,
+                    admission_ms,
+                    ttfb_ms,
+                    bytes_per_second,
+                    runtime_added: runtime_candidates.contains(&snapshot.ip),
+                }
             })
             .collect()
     }
