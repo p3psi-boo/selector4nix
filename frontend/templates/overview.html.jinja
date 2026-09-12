@@ -1,282 +1,292 @@
 {% extends "base.html.jinja" %}
-
+{% block title %}Overview{% endblock %}
 {% block content %}
-  <div class="space-y-8">
+  <div class="space-y-6">
+    <div class="page-heading">
+      <div>
+        <h1>Overview</h1>
+        <p class="text-muted">Upstream health and current activity</p>
+      </div>
+      <a class="button primary" href="#add-substituter">Add substituter</a>
+    </div>
+    <p id="refresh-status" class="text-sm text-muted" role="status">Updates every 5 seconds.</p>
     <div
       id="overview"
-      class="space-y-8"
+      class="space-y-6"
       hx-get="/dashboard/"
       hx-trigger="every 5s"
       hx-target="this"
       hx-swap="outerHTML"
       hx-select="#overview"
     >
-      {% if error %}
-        <div class="rounded-card border border-danger bg-danger-subtle px-4 py-3 text-sm text-danger">{{ error }}</div>
-      {% endif %}
-
-      <section>
-        <h2 class="mb-3 font-semibold">Summary</h2>
-
-        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-4">
-          <div class="rounded-card border border-line bg-surface p-4">
-            <h3 class="text-sm font-medium">Substituters</h3>
-            <div class="mt-2 flex items-baseline gap-1.5">
-              <span class="text-xl font-semibold">{{ model.summary.available_substituters }}</span>
-              <span class="text-sm text-muted">/ {{ model.summary.total_substituters }} available</span>
-            </div>
-          </div>
-
-          <div class="rounded-card border border-line bg-surface p-4">
-            <h3 class="text-sm font-medium">Transferring</h3>
-            <div class="mt-2 flex items-baseline gap-1.5">
-              <span class="text-xl font-semibold">{{ model.summary.transferring_nar_files }}</span>
-              <span class="text-sm text-muted">in progress</span>
-            </div>
-          </div>
-
-          <div class="rounded-card border border-line bg-surface p-4">
-            <h3 class="text-sm font-medium">NAR info cache</h3>
-            <div class="mt-2 flex items-baseline gap-1.5">
-              <span class="text-xl font-semibold">{{ model.summary.nar_info_cache_size }}</span>
-              <span class="text-sm text-muted">/ {{ model.summary.nar_info_cache_capacity }}</span>
-            </div>
-          </div>
-
-          <div class="rounded-card border border-line bg-surface p-4">
-            <h3 class="text-sm font-medium">Cache mode</h3>
-            <div class="mt-2 flex items-baseline gap-1.5">
-              <span class="text-xl font-semibold">
-                {{ "In-memory" if model.summary.cache_mode == "InMemory" else "Persistent" }}
-              </span>
-            </div>
-          </div>
+      {% if error %}<p id="mutation-error" role="alert">{{ error }}</p>{% endif %}
+      <section aria-label="Service summary" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="panel">
+          <h2 class="text-sm text-muted">Upstream health</h2>
+          <p class="metric {% if model.summary.available_substituters == 0 %}text-danger{% endif %}">
+            {{ model.summary.available_substituters }} / {{ model.summary.total_substituters }}
+          </p>
+          <p class="text-sm">
+            {% if model.summary.available_substituters == 0 %}
+              No upstream available. Add or enable one below.
+            {% else %}
+              Available for selection
+            {% endif %}
+          </p>
         </div>
+        <a class="panel hover:bg-canvas" href="/dashboard/transferring"
+          ><h2 class="text-sm text-muted">Current throughput</h2>
+          <p class="metric">
+            {{ (model.summary.bytes_per_second / 1048576) | round(1) }} <span class="text-sm">MiB/s</span>
+          </p>
+          <p class="text-sm">{{ model.summary.transferring_nar_files }} active transfers →</p></a
+        >
+        <a class="panel hover:bg-canvas" href="/dashboard/transferring"
+          ><h2 class="text-sm text-muted">Recent failures</h2>
+          <p class="metric">{{ model.summary.recent_failures }}</p>
+          <p class="text-sm">Among the last 50 transfers →</p></a
+        >
+        <a class="panel hover:bg-canvas" href="/dashboard/cache"
+          ><h2 class="text-sm text-muted">Metadata storage</h2>
+          <p class="metric text-lg">{{ "In memory" if model.summary.cache_mode == "InMemory" else "Persistent" }}</p>
+          <p class="text-sm">{{ model.summary.nar_info_cache_size }} NAR info entries →</p></a
+        >
       </section>
-
-      <section>
-        <h2 class="mb-3 font-semibold">Substituters</h2>
-
-        <div class="overflow-x-auto rounded-card border border-line bg-surface">
-          <table class="w-full">
-            <thead>
-              <tr class="border-b border-line bg-canvas/50 text-left">
-                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                  <span class="text-sm font-medium text-muted">URL</span>
-                </th>
-                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                  <span class="text-sm font-medium text-muted">Priority</span>
-                </th>
-                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                  <span class="text-sm font-medium text-muted">Authentication</span>
-                </th>
-                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                  <span class="text-sm font-medium text-muted">Status</span>
-                </th>
-                <th scope="col" class="px-4 py-2.5 whitespace-nowrap">
-                  <span class="text-sm font-medium text-muted">Actions</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-line-soft">
-              {% for substituter in model.substituters %}
-                <tr class="transition-colors hover:bg-canvas/50">
-                  <td class="flex flex-col gap-px px-4 py-3 whitespace-nowrap">
-                    <span class="font-mono text-sm">{{ substituter.url }}</span>
-                    <span class="font-mono text-xs text-muted">{{ substituter.storage_url }}</span>
-                  </td>
-                  <td class="px-4 py-3 whitespace-nowrap">
-                    <span class="text-sm text-muted tabular-nums">{{ substituter.priority }}</span>
-                  </td>
-                  <td class="px-4 py-3 whitespace-nowrap">
-                    <span class="text-sm text-muted">
-                      {{ "Authenticated" if substituter.has_credential else "Public" }}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3 whitespace-nowrap">
-                    {% if substituter.status == "Normal" %}
-                      <span class="text-sm text-success">Normal</span>
-                    {% elif substituter.status == "MaybeReady" %}
-                      <span class="text-sm text-warn">Maybe ready</span>
-                    {% elif substituter.status == "Disabled" %}
-                      <span class="text-sm text-muted">Disabled</span>
-                    {% elif substituter.status == "Offline" %}
-                      <span class="text-sm text-danger">Offline</span>
-                    {% else %}
-                      <span class="text-sm text-danger">Service error</span>
-                    {% endif %}
-                  </td>
-                  <td class="px-4 py-3 whitespace-nowrap">
-                    {% if substituter.status == "Disabled" %}
-                      <form
-                        method="post"
-                        action="/dashboard/substituters/enable"
-                        hx-post="/dashboard/substituters/enable"
-                        hx-target="#overview"
-                        hx-select="#overview"
-                        hx-swap="outerHTML"
-                      >
-                        <input type="hidden" name="url" value="{{ substituter.url }}" />
-                        <button
-                          type="submit"
-                          class="inline-flex items-center rounded px-3 py-1.5 text-sm font-medium transition-colors hover:bg-canvas"
+      <section class="space-y-3" aria-labelledby="upstreams-title">
+        <h2 id="upstreams-title" class="font-semibold">Substituters</h2>
+        <p class="text-sm text-muted">Changes apply immediately. Temporary changes are lost on restart.</p>
+        {% for sub in model.substituters %}
+          <article
+            class="panel upstream"
+            data-url="{{ sub.url }}"
+            data-storage-url="{{ sub.storage_url }}"
+            data-priority="{{ sub.priority }}"
+            data-enabled="{{ 'true' if sub.status != 'Disabled' else 'false' }}"
+            data-sni="{{ 'true' if sub.supports_sni else 'false' }}"
+          >
+            <div class="page-heading">
+              <div class="min-w-0 flex-1">
+                <h3 class="break-anywhere font-mono font-semibold">{{ sub.url }}</h3>
+                <p class="mt-1 text-sm text-muted">
+                  Priority {{ sub.priority }} · {{ "Authenticated" if sub.has_credential else "Public" }}
+                </p>
+                {% if sub.runtime_changed %}
+                  <p class="mt-1 text-sm text-warn">Temporary change · resets on restart</p>
+                {% endif %}
+              </div>
+              <form
+                id="sub-action-{{ loop.index }}"
+                method="post"
+                action="/dashboard/substituters/{{ 'enable' if sub.status == 'Disabled' else 'disable' }}"
+                data-mutation
+                hx-boost="false"
+              >
+                <input type="hidden" name="url" value="{{ sub.url }}" />
+                <button class="button {{ 'danger' if sub.status != 'Disabled' else '' }}" type="submit">
+                  {{ 'Enable' if sub.status == 'Disabled' else 'Disable' }}
+                </button>
+                <p class="form-feedback" role="status"></p>
+              </form>
+            </div>
+            <p class="mt-3 text-sm">
+              <strong
+                class="{{ 'text-success' if sub.status == 'Normal' else 'text-muted' if sub.status == 'Disabled' else 'text-warn' }}"
+                >{{ 'Recovering' if sub.status == 'MaybeReady' else sub.status }}</strong
+              >
+              · {{ sub.status_detail }}
+            </p>
+            <details class="mt-4" data-state-key="{{ sub.url }}">
+              <summary>Connection details · {{ sub.endpoints | length }} endpoints</summary>
+              <p class="break-anywhere mt-3 text-sm">
+                <span class="text-muted">Storage URL:</span> <span class="font-mono">{{ sub.storage_url }}</span>
+              </p>
+              {% if sub.supports_sni %}
+                <button type="button" class="button mt-3" data-add-proxy="{{ sub.url }}">
+                  Add SNI proxy to this upstream
+                </button>
+              {% endif %}
+              {% if sub.endpoints %}
+                <div class="my-3 flex flex-wrap gap-3">
+                  <label class="field"
+                    >Status<select data-endpoint-filter>
+                      <option value="all">All statuses</option>
+                      {% for status in ['Usable', 'Pending', 'Cooling', 'Incompatible'] %}
+                        <option>{{ status }}</option>
+                      {% endfor %}
+                    </select></label
+                  >
+                  <label class="field"
+                    >Sort by<select data-endpoint-sort>
+                      <option value="selection">Selection order</option>
+                      <option value="latency">Probe latency: low to high</option>
+                      <option value="ttfb">TTFB: low to high</option>
+                      <option value="bandwidth">Bandwidth: high to low</option>
+                    </select></label
+                  >
+                </div>
+                <p class="text-xs text-muted">
+                  TTFB = time to first byte. Probe latency measures admission, not a full download. Missing measurements
+                  show “—”.
+                </p>
+                <div class="endpoint-list mt-3">
+                  {% for endpoint in sub.endpoints %}
+                    <div
+                      class="endpoint"
+                      {% if endpoint.runtime_added %}data-runtime-ip="{{ endpoint.ip }}"{% endif %}
+                      data-status="{{ endpoint.status }}"
+                      data-order="{{ loop.index }}"
+                      data-latency="{{ endpoint.admission_ms if endpoint.admission_ms is not none else '' }}"
+                      data-ttfb="{{ endpoint.ttfb_ms if endpoint.ttfb_ms is not none else '' }}"
+                      data-bandwidth="{{ endpoint.bytes_per_second if endpoint.bytes_per_second is not none else '' }}"
+                    >
+                      <div class="min-w-0">
+                        <p class="break-anywhere font-mono text-sm">{{ endpoint.ip }}</p>
+                        <p class="text-xs text-muted">
+                          {{ endpoint.source }}{% if endpoint.runtime_added %}· Temporary addition{% endif %}
+                        </p>
+                      </div>
+                      <div>
+                        <strong
+                          class="{{ 'text-success' if endpoint.status == 'Usable' else 'text-danger' if endpoint.status == 'Incompatible' else 'text-warn' }} text-sm"
+                          >{{ endpoint.status }}</strong
                         >
-                          Enable
-                        </button>
-                      </form>
-                    {% else %}
-                      <form
-                        method="post"
-                        action="/dashboard/substituters/disable"
-                        hx-post="/dashboard/substituters/disable"
-                        hx-target="#overview"
-                        hx-select="#overview"
-                        hx-swap="outerHTML"
-                      >
-                        <input type="hidden" name="url" value="{{ substituter.url }}" />
-                        <button
-                          type="submit"
-                          class="inline-flex items-center rounded px-3 py-1.5 text-sm font-medium text-danger transition-colors hover:bg-danger-subtle"
-                        >
-                          Disable
-                        </button>
-                      </form>
-                    {% endif %}
-                  </td>
-                </tr>
-                {% for endpoint in substituter.endpoints %}
-                  <tr class="transition-colors hover:bg-canvas/50">
-                    <td class="flex flex-col gap-px px-4 py-2 pl-8 whitespace-nowrap">
-                      <span class="font-mono text-sm text-muted tabular-nums">
-                        {{ endpoint.ip }} · {{ endpoint.source }} ·
-                        {% if endpoint.status is startingwith("Usable") %}
-                          <span class="text-success">{{ endpoint.status }}</span>
-                        {% elif endpoint.status == "Incompatible" %}
-                          <span class="text-danger">{{ endpoint.status }}</span>
-                        {% elif endpoint.status == "Cooling" %}
-                          <span class="text-warn">{{ endpoint.status }}</span>
-                        {% else %}
-                          <span class="text-muted">{{ endpoint.status }}</span>
-                        {% endif %}
-                      </span>
-                    </td>
-                    <td class="px-4 py-2 whitespace-nowrap"></td>
-                    <td class="px-4 py-2 whitespace-nowrap"></td>
-                    <td class="px-4 py-2 whitespace-nowrap"></td>
-                    <td class="px-4 py-2 whitespace-nowrap"></td>
-                  </tr>
-                {% endfor %}
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+                        <p class="text-xs text-muted">{{ endpoint.detail }}</p>
+                      </div>
+                      <dl class="endpoint-metrics">
+                        <div>
+                          <dt>Probe</dt>
+                          <dd>{{ endpoint.admission_ms ~ ' ms' if endpoint.admission_ms is not none else '—' }}</dd>
+                        </div>
+                        <div>
+                          <dt>TTFB</dt>
+                          <dd>{{ endpoint.ttfb_ms ~ ' ms' if endpoint.ttfb_ms is not none else '—' }}</dd>
+                        </div>
+                        <div>
+                          <dt>Bandwidth</dt>
+                          <dd>
+                            {% if endpoint.bytes_per_second is not none %}
+                              {{ (endpoint.bytes_per_second / 1048576) | round(1) }}
+                              MiB/s
+                            {% else %}
+                              —
+                            {% endif %}
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                  {% endfor %}
+                </div>
+                <p class="filter-empty hidden py-3 text-sm" role="status">
+                  No endpoints match. Select “All statuses” to clear the filter.
+                </p>
+              {% else %}
+                <p class="mt-3 text-sm text-muted">
+                  No managed endpoints. This upstream uses its regular connection route.
+                </p>
+              {% endif %}
+            </details>
+          </article>
+        {% else %}
+          <div class="panel">
+            <p>No substituters configured. Add your first upstream below to start routing requests.</p>
+          </div>
+        {% endfor %}
       </section>
     </div>
-
-    <section>
-      <h2 class="mb-3 font-semibold">Add substituter</h2>
-      <p class="mb-3 text-sm text-muted">
-        Runtime changes apply immediately and are not written back to the configuration file. They are lost when the
-        process restarts.
+    <section id="add-substituter" class="panel scroll-mt-32">
+      <h2 class="font-semibold">Add substituter</h2>
+      <p class="mt-1 text-sm text-muted">
+        Applies immediately until restart. Copy a configuration snippet below to keep an addition.
       </p>
-
       <form
-        class="rounded-card border border-line bg-surface p-4"
+        id="add-sub-form"
+        class="mt-4 space-y-3"
         method="post"
         action="/dashboard/substituters"
-        hx-post="/dashboard/substituters"
-        hx-target="#overview"
-        hx-select="#overview"
-        hx-swap="outerHTML"
-        hx-on::after-request="if (event.detail.xhr.getResponseHeader('HX-Trigger') === 'substituter-added') this.reset()"
+        data-mutation
+        hx-boost="false"
       >
-        <div class="flex flex-col gap-3 md:flex-row md:items-end">
-          <label class="flex min-w-0 flex-1 flex-col gap-1">
-            <span class="text-sm font-medium">URL</span>
-            <input
-              type="url"
-              name="url"
-              required
-              placeholder="https://cache.nixos.org/"
-              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
-            />
-          </label>
-          <label class="flex w-full flex-col gap-1 md:w-28">
-            <span class="text-sm font-medium">Priority</span>
-            <input
-              type="number"
+        <div class="form-row">
+          <label class="field flex-1"
+            >URL<input name="url" type="url" required placeholder="https://cache.nixos.org/" /></label
+          ><label class="field"
+            >Priority<input
               name="priority"
+              type="number"
               min="1"
+              max="4294967295"
               step="1"
               placeholder="40"
-              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm tabular-nums"
-            />
-          </label>
-          <label class="flex min-w-0 flex-1 flex-col gap-1">
-            <span class="text-sm font-medium">Storage URL</span>
-            <input
-              type="url"
-              name="storage_url"
-              placeholder="optional"
-              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
-            />
-          </label>
-          <button
-            type="submit"
-            class="inline-flex items-center justify-center rounded bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg transition-colors hover:bg-accent/90"
+              aria-describedby="priority-help"
+            /><span id="priority-help" class="text-xs text-muted"
+              >Lower numbers have higher priority. Default: 40.</span
+            ></label
           >
-            Add
-          </button>
         </div>
+        <details data-state-key="advanced-sub">
+          <summary>Advanced options</summary>
+          <label class="field mt-3"
+            >Storage URL (optional)<input name="storage_url" type="url" placeholder="https://garnix-cache.com/" /><span
+              class="text-xs text-muted"
+              >Set only when NAR files use a separate storage URL.</span
+            ></label
+          >
+        </details>
+        <button class="button primary" type="submit">Add substituter</button>
+        <p class="form-feedback" role="status"></p>
       </form>
     </section>
-
-    <section>
-      <h2 class="mb-3 font-semibold">Add SNI proxy</h2>
-      <p class="mb-3 text-sm text-muted">
-        Adds an extra SNI proxy IP to a substituter that already has Fastly or Cloudflare optimization. The address is
-        probed immediately and is not written back to the configuration file.
+    <section id="add-sni-proxy" class="panel scroll-mt-32">
+      <h2 class="font-semibold">Add SNI proxy</h2>
+      <p class="mt-1 text-sm text-muted">
+        Choose an existing upstream with Fastly or Cloudflare optimization. The IP is probed immediately and is lost on
+        restart.
       </p>
-
       <form
-        class="rounded-card border border-line bg-surface p-4"
+        id="add-sni-form"
+        class="mt-4 space-y-3"
         method="post"
         action="/dashboard/sni-proxies"
-        hx-post="/dashboard/sni-proxies"
-        hx-target="#overview"
-        hx-select="#overview"
-        hx-swap="outerHTML"
-        hx-on::after-request="if (event.detail.xhr.getResponseHeader('HX-Trigger') === 'sni-proxy-added') this.reset()"
+        data-mutation
+        hx-boost="false"
       >
-        <div class="flex flex-col gap-3 md:flex-row md:items-end">
-          <label class="flex min-w-0 flex-1 flex-col gap-1">
-            <span class="text-sm font-medium">Substituter URL</span>
-            <input
-              type="url"
-              name="url"
-              required
-              placeholder="https://cache.nixos.org/"
-              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
-            />
-          </label>
-          <label class="flex min-w-0 flex-1 flex-col gap-1">
-            <span class="text-sm font-medium">Proxy IP</span>
-            <input
-              type="text"
-              name="ip"
-              required
-              placeholder="203.0.113.10"
-              class="rounded border border-line bg-surface px-3 py-1.5 font-mono text-sm"
-            />
-          </label>
-          <button
-            type="submit"
-            class="inline-flex items-center justify-center rounded bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg transition-colors hover:bg-accent/90"
-          >
-            Add
-          </button>
+        <div class="form-row">
+          <label class="field flex-1"
+            >Substituter<select name="url" required>
+              <option value="" disabled selected>Select a substituter</option>
+              {% for sub in model.substituters %}{% if sub.supports_sni %}
+                <option value="{{ sub.url }}">{{ sub.url }}</option>
+              {% endif %}{% endfor %}
+            </select></label
+          ><label class="field flex-1"
+            >Proxy IP<input name="ip" required placeholder="203.0.113.10 or 2001:db8::1"
+          /></label>
         </div>
+        <p id="sni-empty" class="hidden text-sm text-muted">
+          No eligible upstreams. Enable Fastly or Cloudflare optimization in your configuration and restart the service.
+        </p>
+        <button class="button" type="submit">Add SNI proxy</button>
+        <p class="form-feedback" role="status"></p>
       </form>
+    </section>
+    <section class="panel">
+      <h2 class="font-semibold">Keep runtime changes</h2>
+      <p class="mt-1 text-sm text-muted">
+        Choose an upstream to generate its configuration entry. Merge it into your configuration; preserve existing
+        timeout and connection limits. To keep an upstream disabled, remove its entry from the configuration. SNI IPs
+        belong in the matching platform’s candidates list.
+      </p>
+      <div class="form-row mt-3">
+        <label class="field flex-1">Substituter<select id="export-sub"></select></label
+        ><label class="field"
+          >Format<select id="export-format">
+            <option value="toml">TOML</option>
+            <option value="nix">Nix</option>
+          </select></label
+        ><button class="button" type="button" id="copy-config">Copy entry</button>
+      </div>
+      <pre id="config-snippet" class="break-anywhere mt-3 text-sm whitespace-pre-wrap" tabindex="0"></pre>
+      <p id="copy-status" role="status" class="text-sm"></p>
     </section>
   </div>
 {% endblock %}

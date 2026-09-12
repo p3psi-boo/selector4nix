@@ -1,79 +1,101 @@
 {% extends "base.html.jinja" %}
-
-{% macro format_byte(byte) %}
-  {% if byte >= 1024 * 1024 * 1024 %}
-    {{ (byte / (1024 * 1024 * 1024)) | round(2) }}
-    GiB
-  {% elif byte >= 1024 * 1024 %}
-    {{ (byte / (1024 * 1024)) | round(2) }}
-    MiB
-  {% elif byte >= 1024 %}
-    {{ (byte / 1024) | round(2) }}
-    KiB
-  {% else %}
-    {{ byte }}
-    B
-  {% endif %}
-{% endmacro %}
-
+{% block title %}Transfers{% endblock %}
+{% macro bytes(value) %}{% if value >= 1073741824 %}
+  {{ (value / 1073741824) | round(1) }}
+  GiB
+{% elif value >= 1048576 %}
+  {{ (value / 1048576) | round(1) }}
+  MiB
+{% elif value >= 1024 %}
+  {{ (value / 1024) | round(1) }}
+  KiB
+{% else %}
+  {{ value }}
+  B
+{% endif %}{% endmacro %}
 {% block content %}
+  <div class="mb-6">
+    <h1>Transfers</h1>
+    <p class="text-muted">Current downloads and the last 50 finished transfers since startup.</p>
+  </div>
+  <p id="refresh-status" class="mb-4 text-sm text-muted" role="status">
+    Updates every second. Speed uses recent transfer samples.
+  </p>
   <div
     id="transferring"
-    class="space-y-8"
+    class="space-y-6"
     hx-get="/dashboard/transferring"
     hx-trigger="every 1s"
     hx-target="this"
     hx-swap="outerHTML"
+    hx-select="#transferring"
   >
-    <section>
-      <h2 class="mb-3 font-semibold">Transferring</h2>
-      <div class="flex flex-col gap-3">
-        {% for file in model.files %}
-          <div class="flex flex-col gap-2.5 rounded-card border border-line bg-surface p-4">
-            <div class="flex flex-col gap-1.5 md:flex-row md:justify-between">
-              <span class="truncate font-mono text-sm">
-                {% if file.package_name is not none %}
-                  {{ file.package_name }}
-                {% else %}
-                  {{ file.nar_file_name }}
-                {% endif %}
-              </span>
-              <span class="font-mono text-sm text-muted">{{ file.substituter_url }}</span>
-            </div>
-
-            <div class="h-1.5 overflow-hidden rounded-full bg-neutral-muted">
-              {% if file.bytes_total is not none and file.bytes_total > 0 %}
-                <div
-                  class="xfer-fill h-full rounded-full bg-accent transition-[width] duration-700 ease-out"
-                  style="width:{{ file.bytes_transferred / file.bytes_total * 100 }}%"
-                ></div>
-              {% else %}
-                <div
-                  id="pbr-{{ file.started_at_unix_ms }}"
-                  class="h-full w-1/3 animate-indeterminate rounded-full bg-accent"
-                  hx-preserve
-                ></div>
-              {% endif %}
-            </div>
-
-            <span class="text-sm text-muted">
-              {% if file.bytes_total is not none %}
-                {% set transferred = format_byte(file.bytes_transferred) %}
-                {% set total = format_byte(file.bytes_total) %}
-                {% set percentage = (file.bytes_transferred / file.bytes_total * 100) | round(1) %}
-                {{ transferred ~ " / " ~ total ~ "(" ~ percentage ~ "%)" ~ " · " ~ file.elapsed_secs ~ "s" }}
-              {% else %}
-                {% set transferred = format_byte(file.bytes_transferred) %}
-                {{ transferred ~ " / Unknown · " ~ file.elapsed_secs ~ "s" }}
-              {% endif %}
-            </span>
+    <section class="space-y-3">
+      <h2 class="font-semibold">Active transfers · {{ model.files | length }}</h2>
+      {% for file in model.files %}
+        <article class="panel space-y-3">
+          <h3 class="break-anywhere font-mono text-sm">
+            {{ file.package_name if file.package_name is not none else file.nar_file_name }}
+          </h3>
+          <p class="break-anywhere font-mono text-xs text-muted">{{ file.substituter_url }}</p>
+          <progress
+            class="h-2 w-full accent-accent"
+            aria-label="Download progress"
+            {% if file.bytes_total is not none and file.bytes_total > 0 %}
+              value="{{ file.bytes_transferred }}" max="{{ file.bytes_total }}"
+            {% else %}
+              value="0" max="1"
+            {% endif %}
+          ></progress>
+          <div class="flex flex-wrap justify-between gap-2 text-sm tabular-nums">
+            <span
+              >{{ bytes(file.bytes_transferred) }} /
+              {{ bytes(file.bytes_total) if file.bytes_total is not none else 'Unknown size' }}</span
+            ><strong>{{ bytes(file.bytes_per_second) }}/s</strong>
           </div>
-        {% else %}
-          <div class="flex flex-col items-center justify-center py-16">
-            <span class="text-sm text-muted">No active transfers</span>
+          <p class="text-sm text-muted tabular-nums">
+            {{ file.elapsed_secs }}s elapsed ·
+            {% if file.remaining_secs is not none %}
+              About {{ file.remaining_secs }}s remaining
+            {% else %}
+              Remaining time unavailable
+            {% endif %}{% if file.bytes_per_second == 0 %}· Waiting for data{% endif %}
+          </p>
+        </article>
+      {% else %}
+        <div class="panel">
+          <p>No active transfers.</p>
+          <p class="mt-1 text-sm text-muted">
+            Downloads appear here when Nix fetches packages through this proxy. Recent results remain below.
+          </p>
+        </div>
+      {% endfor %}
+    </section>
+    <section class="space-y-3">
+      <h2 class="font-semibold">Recent results</h2>
+      {% for file in model.recent %}
+        <article class="panel">
+          <div class="page-heading">
+            <h3 class="break-anywhere min-w-0 flex-1 font-mono text-sm">
+              {{ file.package_name if file.package_name is not none else file.nar_file_name }}
+            </h3>
+            <span
+              class="{{ 'text-success' if file.outcome == 'Completed' else 'text-danger' if file.outcome is startingwith('Failed') else 'text-muted' }} text-sm font-medium"
+              >{{ file.outcome }}</span
+            >
           </div>
-        {% endfor %}
-      </div>
+          <p class="break-anywhere mt-2 text-xs text-muted">
+            {{ file.substituter_url }} · {{ bytes(file.bytes_transferred) }} · {{ file.elapsed_secs }}s
+          </p>
+          {% if file.outcome is startingwith('Failed') %}
+            <p class="mt-2 text-sm">
+              Retry the Nix command. If failures continue, check this upstream’s status and service logs.
+            </p>
+          {% endif %}
+        </article>
+      {% else %}
+        <p class="text-sm text-muted">No finished transfers since startup.</p>
+      {% endfor %}
     </section>
   </div>
-{% endblock content %}
+{% endblock %}
