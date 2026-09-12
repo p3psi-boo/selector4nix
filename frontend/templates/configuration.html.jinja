@@ -1,28 +1,28 @@
 {% extends "base.html.jinja" %}
-
+{% block title %}Configuration{% endblock %}
 {% block content %}
-  <div id="configuration" class="space-y-8">
+  <div id="configuration" class="space-y-6">
+    <div>
+      <h1>Configuration</h1>
+      <p class="text-muted">Startup settings, read only. Edit your configuration file and restart to apply changes.</p>
+      <a class="mt-3 inline-block text-accent underline" href="/dashboard/#upstreams-title"
+        >View runtime upstreams and export changes →</a
+      >
+    </div>
     {% for section in model.sections %}
-      <section>
+      <section class="panel">
         <h2 class="mb-3 font-semibold">{{ section.title }}</h2>
-
-        <div class="overflow-hidden rounded-card border border-line bg-surface">
-          <table class="w-full">
-            <tbody class="divide-y divide-line-soft">
-              {% for entry in section.entries %}
-                <tr class="transition-colors hover:bg-canvas/50">
-                  <td class="flex flex-col gap-1 px-4 py-3">
-                    <span class="text-sm font-medium">{{ entry.name }}</span>
-                    <span class="text-xs text-muted">{{ entry.description }}</span>
-                  </td>
-                  <td class="px-4 py-3 text-right whitespace-nowrap">
-                    <span class="font-mono text-sm text-muted tabular-nums">{{ entry.value }}</span>
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
+        <dl>
+          {% for entry in section.entries %}
+            <div class="config-row">
+              <dt class="min-w-0">
+                <span class="text-sm font-medium">{{ entry.name }}</span>
+                <p class="text-xs text-muted">{{ entry.description }}</p>
+              </dt>
+              <dd>{{ entry.value }}</dd>
+            </div>
+          {% endfor %}
+        </dl>
       </section>
     {% endfor %}
   </div>
